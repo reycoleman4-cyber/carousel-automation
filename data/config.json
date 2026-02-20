@@ -1,0 +1,12 @@
+{
+  "baseUrl": "https://sound-surge-production.up.railway.app",
+  "schedule": {
+    "enabled": true,
+    "times": [
+      "10:00",
+      "13:00",
+      "16:00"
+    ]
+  },
+  "blotatoApiKey": "blt_br4VAh5SGGjqrJHOaIIQ3Xla9eZLZzIqyLdLkhAshds="
+}

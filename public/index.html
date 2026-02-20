@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Carousel Automation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css?v=4" />
+</head>
+<body>
+  <div class="app auth-screen" id="appRoot">
+    <div id="authView" class="auth-view">
+      <div class="auth-card">
+        <h1 class="auth-title">Carousel Automation</h1>
+        <p class="auth-subtitle">Sign in or create an account</p>
+        <div class="auth-tabs">
+          <button type="button" class="auth-tab active" data-tab="login">Log in</button>
+          <button type="button" class="auth-tab" data-tab="signup">Sign up</button>
+        </div>
+        <form id="authLoginForm" class="auth-form" novalidate>
+          <label class="field">
+            <span>Email</span>
+            <input type="email" id="authEmail" placeholder="you@example.com" required autocomplete="email" />
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input type="password" id="authPassword" placeholder="••••••••" required autocomplete="current-password" />
+          </label>
+          <p id="authError" class="auth-error" hidden></p>
+          <button type="submit" class="btn btn-primary auth-submit">Log in</button>
+        </form>
+        <form id="authSignupForm" class="auth-form" hidden novalidate>
+          <label class="field">
+            <span>Email</span>
+            <input type="email" id="authSignupEmail" placeholder="you@example.com" required autocomplete="email" />
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input type="password" id="authSignupPassword" placeholder="Min 6 characters" required autocomplete="new-password" minlength="6" />
+          </label>
+          <p id="authSignupError" class="auth-error" hidden></p>
+          <p id="authSignupSuccess" class="auth-success" hidden>Check your email to confirm your account.</p>
+          <button type="submit" class="btn btn-primary auth-submit">Create account</button>
+        </form>
+      </div>
+    </div>
+    <div id="appShell" hidden>
+    <header class="header">
+      <div class="header-inner">
+        <nav class="nav">
+          <a href="#/" class="nav-link" id="navPages">Pages</a>
+          <a href="#/campaigns" class="nav-link" id="navCampaigns">Campaigns</a>
+          <a href="#/calendar" class="nav-link" id="navCalendar">Calendar</a>
+          <a href="#/logins" class="nav-link" id="navLogins">Logins</a>
+          <button type="button" class="btn btn-ghost" id="openSettings">Settings</button>
+          <button type="button" class="btn btn-ghost" id="logoutBtn">Log out</button>
+        </nav>
+      </div>
+      <div class="breadcrumb" id="breadcrumb"></div>
+    </header>
+
+    <main id="main" class="main">
+      <!-- Views rendered by app.js -->
+    </main>
+
+    <footer class="footer"></footer>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="folderModal" hidden>
+    <div class="modal modal-lg">
+      <h2 id="folderModalTitle">Folder</h2>
+      <div class="folder-modal-photos" id="folderModalPhotos"></div>
+      <div class="folder-modal-actions">
+        <input type="file" accept="image/*" multiple id="folderModalAddInput" hidden />
+        <button type="button" class="btn btn-secondary" id="folderModalAddBtn">Add photos</button>
+        <button type="button" class="btn btn-ghost" id="folderModalClose">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="addPageToCampaignModal" hidden>
+    <div class="modal">
+      <h2>Add page to campaign</h2>
+      <p class="hint">Select a page to add to this campaign.</p>
+      <div id="addPageToCampaignList" class="new-campaign-pages"></div>
+      <div class="modal-actions" style="margin-top:1rem;">
+        <button type="button" class="btn btn-secondary" id="addPageToCampaignCancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="newCampaignModal" hidden>
+    <div class="modal">
+      <form id="newCampaignForm" novalidate>
+        <h2>Start a new campaign</h2>
+        <label class="field">
+          <span>Campaign name</span>
+          <input type="text" id="newCampaignName" placeholder="New campaign" />
+        </label>
+        <p class="hint" style="margin-top:8px;">Select which pages will post this campaign:</p>
+        <div id="newCampaignPages" class="new-campaign-pages"></div>
+        <div class="modal-actions" style="margin-top:1rem;">
+          <button type="button" class="btn btn-secondary" id="newCampaignCancel">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="newCampaignCreate">Create campaign</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="editAvatarModal" hidden>
+    <div class="modal modal-lg">
+      <h2>Edit profile picture</h2>
+      <p class="hint">Drag to reposition, use the slider to zoom. Crop area is 400×400 (app display size).</p>
+      <div class="edit-avatar-crop-wrap">
+        <div class="edit-avatar-crop-box" id="editAvatarCropBox">
+          <div class="edit-avatar-img-wrap" id="editAvatarImgWrap">
+            <img id="editAvatarImg" alt="" />
+          </div>
+        </div>
+        <div class="edit-avatar-controls">
+          <label class="edit-avatar-zoom-label">
+            <span>Zoom</span>
+            <input type="range" id="editAvatarZoom" min="1" max="3" step="0.05" value="1" />
+          </label>
+        </div>
+      </div>
+      <div class="modal-actions" style="margin-top:1rem;">
+        <input type="file" accept="image/*" id="editAvatarFileInput" hidden />
+        <button type="button" class="btn btn-secondary" id="editAvatarChangeBtn">Change image</button>
+        <button type="button" class="btn btn-primary" id="editAvatarSaveBtn">Save</button>
+        <button type="button" class="btn btn-ghost" id="editAvatarCancelBtn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="releaseDayModal" hidden>
+    <div class="modal">
+      <h2>Release date</h2>
+      <label class="field">
+        <span>Release date</span>
+        <input type="date" id="releaseDayInput" />
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="releaseDayCancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="releaseDaySave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="campaignDateRangeModal" hidden>
+    <div class="modal">
+      <h2>Campaign date range</h2>
+      <p class="hint">When will this campaign be active? Posts are scheduled within this range.</p>
+      <label class="field">
+        <span>Start date</span>
+        <input type="date" id="campaignStartDateInput" />
+      </label>
+      <label class="field">
+        <span>End date</span>
+        <input type="date" id="campaignEndDateInput" />
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="campaignDateRangeCancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="campaignDateRangeSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="duplicatePostTypeModal" hidden>
+    <div class="modal">
+      <h2>Duplicate post type</h2>
+      <p class="hint">Choose which campaign and page to add the copy to.</p>
+      <label class="field">
+        <span>Target (Campaign → Page)</span>
+        <select id="duplicateTargetSelect" class="field-select"></select>
+      </label>
+      <div class="modal-actions" style="margin-top:1rem;">
+        <button type="button" class="btn btn-secondary" id="duplicatePostTypeCancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="duplicatePostTypeConfirm">Duplicate</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="addPostTypeModal" hidden>
+    <div class="modal">
+      <h2>Add post type</h2>
+      <label class="field">
+        <span>Post type name / header</span>
+        <input type="text" id="addPostTypeName" placeholder="e.g. Single, EP, Feature" />
+      </label>
+      <label class="field">
+        <span>Media type</span>
+        <select id="addPostTypeMedia" class="field-select">
+          <option value="photo">Photos</option>
+          <option value="video">Videos (without text)</option>
+          <option value="video_text">Videos (add text)</option>
+        </select>
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="addPostTypeCancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="addPostTypeCreate">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="joinCampaignModal" hidden>
+    <div class="modal">
+      <h2>Join campaign</h2>
+      <p class="hint">Select a campaign to add this page to.</p>
+      <div id="joinCampaignList" class="new-campaign-pages"></div>
+      <div class="modal-actions" style="margin-top:1rem;">
+        <button type="button" class="btn btn-secondary" id="joinCampaignCancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="settingsModal" hidden>
+    <div class="modal modal-settings">
+      <h2>Settings</h2>
+      <div id="settingsProfileSection" class="settings-section">
+        <h3 class="settings-subtitle">Your username</h3>
+        <div class="settings-username-row">
+          <span id="settingsUsername" class="settings-username"></span>
+          <button type="button" class="btn btn-secondary btn-sm" id="settingsUsernameEdit">Edit</button>
+        </div>
+        <div id="settingsUsernameEditWrap" class="settings-username-edit-wrap" hidden>
+          <input type="text" id="settingsUsernameInput" placeholder="Username" class="settings-team-input" maxlength="50" />
+          <div class="settings-username-edit-actions">
+            <button type="button" class="btn btn-primary" id="settingsUsernameSave">Save</button>
+            <button type="button" class="btn btn-ghost" id="settingsUsernameCancel">Cancel</button>
+          </div>
+          <p id="settingsUsernameError" class="auth-error" hidden></p>
+        </div>
+        <p class="hint">Share this username so others can add you as a team member or to a campaign.</p>
+      </div>
+      <div id="settingsTeamSection" class="settings-section">
+        <h3 class="settings-subtitle">Team members</h3>
+        <p class="hint">Add people by their username to give them access to your account.</p>
+        <div class="settings-team-add">
+          <input type="text" id="settingsTeamUsername" placeholder="Username" class="settings-team-input" />
+          <button type="button" class="btn btn-secondary" id="settingsTeamAddBtn">Add</button>
+        </div>
+        <p id="settingsTeamError" class="auth-error" hidden></p>
+        <ul id="settingsTeamList" class="settings-team-list"></ul>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-subtitle">App config</h3>
+        <label class="field">
+          <span>Base URL (for webContentUrls)</span>
+          <input type="url" id="baseUrl" placeholder="https://your-server.com" />
+        </label>
+        <p class="hint">Set this to your public URL (e.g. ngrok or your domain) so Blotato can fetch generated images.</p>
+        <label class="field">
+          <span>Blotato API Key</span>
+          <input type="password" id="blotatoApiKey" placeholder="Your Blotato API key" autocomplete="off" />
+        </label>
+        <p class="hint">Required for auto-posting to TikTok. Get it from your Blotato dashboard.</p>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="closeSettings">Cancel</button>
+        <button type="button" class="btn btn-primary" id="saveSettings">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js?v=4"></script>
+</body>
+</html>

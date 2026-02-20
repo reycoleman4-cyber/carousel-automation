@@ -1,0 +1,266 @@
+{
+  "nextId": 11,
+  "items": [
+    {
+      "id": 3,
+      "name": "Baby Don't Hurt Me - Emma Ogier",
+      "scheduleTimes": [
+        "10:00",
+        "19:00",
+        "16:00"
+      ],
+      "scheduleEnabled": true,
+      "deployed": false,
+      "textOptions": [
+        "text on screen test"
+      ],
+      "createdAt": "2026-02-19T05:23:26.192Z",
+      "folderCount": 1,
+      "textOptionsPerFolder": [
+        [
+          "songs i like"
+        ]
+      ],
+      "pageIds": [
+        5,
+        13,
+        2,
+        12
+      ],
+      "textStylePerFolder": [
+        {
+          "x": 0,
+          "y": 0,
+          "fontSize": 0.1,
+          "font": "Helvetica, sans-serif",
+          "color": "white",
+          "strokeWidth": 5
+        }
+      ],
+      "scheduleDaysOfWeek": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "releaseDate": "2026-02-27",
+      "scheduleStartDate": null,
+      "scheduleEndDate": null,
+      "releaseType": "single"
+    },
+    {
+      "id": 6,
+      "name": "Dry Spell - Kacey Musgraves",
+      "pageIds": [
+        2,
+        5
+      ],
+      "folderCount": 3,
+      "textOptionsPerFolder": [
+        [
+          "Follow for more",
+          "Like & Save",
+          "Comment below",
+          "Link in bio",
+          "Share with a friend",
+          "Double tap if you agree"
+        ],
+        [
+          "Follow for more",
+          "Like & Save",
+          "Comment below",
+          "Link in bio",
+          "Share with a friend",
+          "Double tap if you agree"
+        ],
+        [
+          "Follow for more",
+          "Like & Save",
+          "Comment below",
+          "Link in bio",
+          "Share with a friend",
+          "Double tap if you agree"
+        ]
+      ],
+      "scheduleTimes": [
+        "10:00",
+        "13:00",
+        "16:00"
+      ],
+      "scheduleEnabled": true,
+      "deployed": false,
+      "createdAt": "2026-02-19T07:28:07.076Z",
+      "releaseDate": "2026-03-11",
+      "releaseType": "single"
+    },
+    {
+      "id": 8,
+      "name": "Real Slow - Flatland Cavalry",
+      "pageIds": [
+        2,
+        5
+      ],
+      "folderCount": 3,
+      "textOptionsPerFolder": [
+        [
+          "Follow for more",
+          "Like & Save",
+          "Comment below",
+          "Link in bio",
+          "Share with a friend",
+          "Double tap if you agree"
+        ],
+        [
+          "Follow for more",
+          "Like & Save",
+          "Comment below",
+          "Link in bio",
+          "Share with a friend",
+          "Double tap if you agree"
+        ],
+        [
+          "Follow for more",
+          "Like & Save",
+          "Comment below",
+          "Link in bio",
+          "Share with a friend",
+          "Double tap if you agree"
+        ]
+      ],
+      "scheduleTimes": [
+        "10:00",
+        "13:00",
+        "16:00"
+      ],
+      "scheduleEnabled": true,
+      "deployed": false,
+      "createdAt": "2026-02-19T08:13:26.657Z",
+      "releaseDate": "2026-03-13",
+      "releaseType": "single"
+    },
+    {
+      "id": 9,
+      "name": "Possum Rock",
+      "pageIds": [
+        2,
+        5
+      ],
+      "releaseType": "ep",
+      "folderCount": 3,
+      "textOptionsPerFolder": [
+        [
+          "Follow for more",
+          "Like & Save",
+          "Comment below",
+          "Link in bio",
+          "Share with a friend",
+          "Double tap if you agree"
+        ],
+        [
+          "Follow for more",
+          "Like & Save",
+          "Comment below",
+          "Link in bio",
+          "Share with a friend",
+          "Double tap if you agree"
+        ],
+        [
+          "Follow for more",
+          "Like & Save",
+          "Comment below",
+          "Link in bio",
+          "Share with a friend",
+          "Double tap if you agree"
+        ]
+      ],
+      "scheduleTimes": [
+        "10:00",
+        "13:00",
+        "16:00"
+      ],
+      "scheduleEnabled": true,
+      "deployed": false,
+      "createdAt": "2026-02-19T08:39:59.199Z",
+      "releaseDate": "2026-03-13"
+    },
+    {
+      "id": 10,
+      "name": "Megan Moroney ft. Kacey Musgraves",
+      "pageIds": [
+        2,
+        5,
+        7
+      ],
+      "releaseType": "single",
+      "folderCount": 3,
+      "textOptionsPerFolder": [
+        [
+          "songs ive been on"
+        ],
+        [
+          "Follow for more",
+          "Like & Save",
+          "Comment below",
+          "Link in bio",
+          "Share with a friend",
+          "Double tap if you agree"
+        ],
+        [
+          "Follow for more",
+          "Like & Save",
+          "Comment below",
+          "Link in bio",
+          "Share with a friend",
+          "Double tap if you agree"
+        ]
+      ],
+      "scheduleTimes": [
+        "10:00",
+        "13:00",
+        "16:00"
+      ],
+      "scheduleEnabled": true,
+      "deployed": false,
+      "createdAt": "2026-02-19T08:43:03.867Z",
+      "releaseDate": "2026-02-20",
+      "textStylePerFolder": [
+        {
+          "x": 50,
+          "y": 40,
+          "fontSize": 0.06,
+          "font": "Arial, sans-serif",
+          "color": "white",
+          "strokeWidth": 2
+        },
+        {
+          "x": 50,
+          "y": 92,
+          "fontSize": 0.06,
+          "font": "Arial, sans-serif",
+          "color": "white",
+          "strokeWidth": 2
+        },
+        {
+          "x": 50,
+          "y": 92,
+          "fontSize": 0.06,
+          "font": "Arial, sans-serif",
+          "color": "white",
+          "strokeWidth": 2
+        }
+      ],
+      "scheduleDaysOfWeek": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ]
+    }
+  ]
+}

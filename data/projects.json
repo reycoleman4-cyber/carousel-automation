@@ -1,0 +1,66 @@
+{
+  "nextId": 14,
+  "items": [
+    {
+      "id": 2,
+      "name": "@adeline..marie",
+      "createdAt": "2026-02-19T05:23:04.454Z",
+      "section": "AI Influencers",
+      "blotatoAccountId": "29071"
+    },
+    {
+      "id": 5,
+      "name": "@luci..lee",
+      "createdAt": "2026-02-19T05:41:51.649Z",
+      "section": "AI Influencers",
+      "blotatoAccountId": "29882"
+    },
+    {
+      "id": 7,
+      "name": "@lost_and_found_music",
+      "createdAt": "2026-02-19T07:23:11.412Z",
+      "section": "Genre Pages",
+      "blotatoAccountId": "27515"
+    },
+    {
+      "id": 8,
+      "name": "@iykyk_country",
+      "createdAt": "2026-02-19T07:24:49.354Z",
+      "section": "Genre Pages",
+      "blotatoAccountId": "29664"
+    },
+    {
+      "id": 9,
+      "name": "@brandicentral",
+      "createdAt": "2026-02-19T07:44:23.357Z",
+      "section": "Fan Pages",
+      "blotatoAccountId": "29649"
+    },
+    {
+      "id": 10,
+      "name": "@brandi.carlile.fan",
+      "createdAt": "2026-02-19T07:45:13.777Z",
+      "section": "Fan Pages"
+    },
+    {
+      "id": 11,
+      "name": "@flatland_archives",
+      "createdAt": "2026-02-19T07:46:49.635Z",
+      "section": "Fan Pages"
+    },
+    {
+      "id": 12,
+      "name": "@choose_your_aesthetic__",
+      "createdAt": "2026-02-19T07:47:41.168Z",
+      "section": "UGC Pages",
+      "blotatoAccountId": "29066"
+    },
+    {
+      "id": 13,
+      "name": "@country.mp3",
+      "createdAt": "2026-02-19T07:48:04.601Z",
+      "section": "UGC Pages",
+      "blotatoAccountId": "30551"
+    }
+  ]
+}
