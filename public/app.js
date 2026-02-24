@@ -169,6 +169,67 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+/** Show an alert in a styled modal (replaces window.alert). Returns a Promise that resolves when dismissed. */
+function showAlert(message) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('appDialog');
+    const msgEl = document.getElementById('appDialogMessage');
+    const promptWrap = document.getElementById('appDialogPromptWrap');
+    const actionsEl = document.getElementById('appDialogActions');
+    if (!overlay || !msgEl || !actionsEl) return resolve();
+    msgEl.textContent = String(message ?? '');
+    promptWrap.hidden = true;
+    actionsEl.innerHTML = '<button type="button" class="btn btn-primary" data-result="ok">OK</button>';
+    overlay.hidden = false;
+    const done = () => { overlay.hidden = true; overlay.onclick = null; resolve(); };
+    actionsEl.querySelector('[data-result="ok"]').onclick = done;
+    overlay.onclick = (e) => { if (e.target === overlay) done(); };
+  });
+}
+
+/** Show a confirm dialog in a styled modal (replaces window.confirm). Returns Promise<boolean>. */
+function showConfirm(message, options = {}) {
+  const { confirmLabel = 'OK', cancelLabel = 'Cancel' } = options;
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('appDialog');
+    const msgEl = document.getElementById('appDialogMessage');
+    const promptWrap = document.getElementById('appDialogPromptWrap');
+    const actionsEl = document.getElementById('appDialogActions');
+    if (!overlay || !msgEl || !actionsEl) return resolve(false);
+    msgEl.textContent = String(message ?? '');
+    promptWrap.hidden = true;
+    actionsEl.innerHTML = `<button type="button" class="btn btn-secondary" data-result="cancel">${escapeHtml(cancelLabel)}</button><button type="button" class="btn btn-primary" data-result="ok">${escapeHtml(confirmLabel)}</button>`;
+    overlay.hidden = false;
+    const done = (ok) => { overlay.hidden = true; overlay.onclick = null; resolve(ok); };
+    actionsEl.querySelector('[data-result="cancel"]').onclick = () => done(false);
+    actionsEl.querySelector('[data-result="ok"]').onclick = () => done(true);
+    overlay.onclick = (e) => { if (e.target === overlay) done(false); };
+  });
+}
+
+/** Show a prompt in a styled modal (replaces window.prompt). Returns Promise<string|null>. */
+function showPrompt(message, defaultValue = '') {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('appDialog');
+    const msgEl = document.getElementById('appDialogMessage');
+    const promptWrap = document.getElementById('appDialogPromptWrap');
+    const inputEl = document.getElementById('appDialogInput');
+    const actionsEl = document.getElementById('appDialogActions');
+    if (!overlay || !msgEl || !promptWrap || !inputEl || !actionsEl) return resolve(null);
+    msgEl.textContent = String(message ?? '');
+    inputEl.value = String(defaultValue ?? '');
+    promptWrap.hidden = false;
+    actionsEl.innerHTML = `<button type="button" class="btn btn-secondary" data-result="cancel">Cancel</button><button type="button" class="btn btn-primary" data-result="ok">OK</button>`;
+    overlay.hidden = false;
+    inputEl.focus();
+    const done = (value) => { overlay.hidden = true; promptWrap.hidden = true; overlay.onclick = null; resolve(value); };
+    actionsEl.querySelector('[data-result="cancel"]').onclick = () => done(null);
+    actionsEl.querySelector('[data-result="ok"]').onclick = () => done(inputEl.value.trim());
+    overlay.onclick = (e) => { if (e.target === overlay) done(null); };
+    inputEl.onkeydown = (e) => { if (e.key === 'Enter') done(inputEl.value.trim()); if (e.key === 'Escape') done(null); };
+  });
+}
+
 // --- API ---
 function apiProjects() {
   return apiWithAuth(`${API}/api/projects`).then((r) => r.json());
@@ -217,7 +278,11 @@ function apiUpdateCampaign(projectId, campaignId, data, postTypeId) {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  }).then((r) => r.json());
+  }).then(async (r) => {
+    const json = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(json.error || json.message || `Request failed (${r.status})`);
+    return json;
+  });
 }
 function apiDeleteCampaign(projectId, campaignId) {
   return apiWithAuth(`${API}/api/projects/${projectId}/campaigns/${campaignId}`, { method: 'DELETE' }).then((r) => r.json());
@@ -261,6 +326,14 @@ function apiDeleteFolderMedia(projectId, campaignId, folderNum, filename, postTy
   const base = `${API}/api/projects/${projectId}/campaigns/${campaignId}/folders/${folderNum}/media/${encodeURIComponent(filename)}`;
   const url = postTypeId ? `${base}?postTypeId=${encodeURIComponent(postTypeId)}` : base;
   return apiWithAuth(url, { method: 'DELETE' }).then((r) => r.json());
+}
+function apiClearFolder(projectId, campaignId, folderNum, postTypeId) {
+  const base = `${API}/api/projects/${projectId}/campaigns/${campaignId}/folders/${folderNum}/clear`;
+  const url = postTypeId ? `${base}?postTypeId=${encodeURIComponent(postTypeId)}` : base;
+  return apiWithAuth(url, { method: 'DELETE' }).then((r) => {
+    if (!r.ok) return r.json().then((d) => Promise.reject(new Error(d.error || 'Failed to clear folder')));
+    return r.json();
+  });
 }
 function folderImageUrl(projectId, campaignId, folderNum, filename, postTypeId) {
   const base = `${API}/api/projects/${projectId}/campaigns/${campaignId}/folders/${folderNum}/images/${encodeURIComponent(filename)}`;
@@ -386,6 +459,73 @@ function apiUploadCampaignAvatar(campaignId, file) {
 function campaignAvatarUrl(campaignId) {
   return `${API}/api/campaigns/${campaignId}/avatar?t=${Date.now()}`;
 }
+
+function apiTrends(campaignId) {
+  const url = campaignId != null ? `${API}/api/trends?campaignId=${encodeURIComponent(campaignId)}` : `${API}/api/trends`;
+  return apiWithAuth(url).then((r) => r.json());
+}
+function apiTrend(trendId) {
+  return apiWithAuth(`${API}/api/trends/${trendId}`).then((r) => r.json());
+}
+function apiCreateTrend(name, pageIds, campaignId) {
+  const body = { name: name || 'New trend', pageIds };
+  if (campaignId != null) body.campaignId = String(campaignId);
+  return apiWithAuth(`${API}/api/trends`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then((r) => r.json());
+}
+function apiUpdateTrend(trendId, data) {
+  return apiWithAuth(`${API}/api/trends/${trendId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  }).then((r) => r.json());
+}
+function apiDeleteTrend(trendId) {
+  return apiWithAuth(`${API}/api/trends/${trendId}`, { method: 'DELETE' }).then((r) => r.json());
+}
+function apiTrendPageImages(trendId, pageIndex) {
+  return apiWithAuth(`${API}/api/trends/${trendId}/pages/${pageIndex}/images`).then((r) => r.json());
+}
+function apiTrendPageUpload(trendId, pageIndex, files) {
+  const form = new FormData();
+  for (const f of files) form.append('photo', f);
+  return apiWithAuth(`${API}/api/trends/${trendId}/pages/${pageIndex}/upload`, { method: 'POST', body: form }).then((r) => r.json());
+}
+function apiTrendPageFolders(trendId, pageIndex) {
+  return apiWithAuth(`${API}/api/trends/${trendId}/pages/${pageIndex}/folders`).then((r) => r.json());
+}
+function apiTrendPageFolderImages(trendId, pageIndex, folderNum) {
+  return apiWithAuth(`${API}/api/trends/${trendId}/pages/${pageIndex}/folders/${folderNum}/images`).then((r) => r.json());
+}
+function apiTrendPageFolderUpload(trendId, pageIndex, folderNum, files) {
+  const form = new FormData();
+  for (const f of files) form.append('photo', f);
+  return apiWithAuth(`${API}/api/trends/${trendId}/pages/${pageIndex}/folders/${folderNum}/upload`, { method: 'POST', body: form }).then((r) => r.json());
+}
+function apiTrendPreview(trendId, pageIndex, folderNum, textStyle, textOptions) {
+  return apiWithAuth(`${API}/api/trends/${trendId}/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pageIndex, folderNum, textStyle, textOptions }),
+  }).then((r) => r.json());
+}
+function apiTrendRun(trendId, textStyle, textOptions) {
+  return apiWithAuth(`${API}/api/trends/${trendId}/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ textStyle: textStyle || null, textOptions: textOptions || null }),
+  }).then((r) => r.json());
+}
+function apiTrendLatest(trendId) {
+  return apiWithAuth(`${API}/api/trends/${trendId}/latest`).then((r) => r.json());
+}
+function apiTrendClearLatest(trendId) {
+  return apiWithAuth(`${API}/api/trends/${trendId}/latest`, { method: 'DELETE' }).then((r) => r.json());
+}
+
 function apiCreatePostType(projectId, campaignId, name, mediaType) {
   return apiWithAuth(`${API}/api/projects/${projectId}/campaigns/${campaignId}/postTypes`, {
     method: 'POST',
@@ -519,20 +659,23 @@ function apiTeamRemove(userId) {
 function updateNavActive() {
   const parts = (window.location.hash.slice(1) || '/').split('/').filter(Boolean);
   const first = parts[0] || '';
-  const pages = document.getElementById('navPages');
+  const home = document.getElementById('navHome');
   const campaigns = document.getElementById('navCampaigns');
+  const trends = document.getElementById('navTrends');
   const calendar = document.getElementById('navCalendar');
   const logins = document.getElementById('navLogins');
   const settings = document.getElementById('openSettings');
   const settingsModal = document.getElementById('settingsModal');
-  [pages, campaigns, calendar, logins].forEach((el) => { if (el) el.classList.remove('active'); });
+  [home, campaigns, trends, calendar, logins].forEach((el) => { if (el) el.classList.remove('active'); });
   if (settings) settings.classList.remove('active');
   if (settingsModal && !settingsModal.hidden && settings) {
     settings.classList.add('active');
   } else if (first === '' || first === 'project') {
-    if (pages) pages.classList.add('active');
+    if (home) home.classList.add('active');
   } else if (first === 'campaigns' || first === 'campaign') {
     if (campaigns) campaigns.classList.add('active');
+  } else if (first === 'trends' || (first && first.startsWith('trends'))) {
+    if (trends) trends.classList.add('active');
   } else if (first === 'calendar') {
     if (calendar) calendar.classList.add('active');
   } else if (first === 'logins') {
@@ -548,6 +691,11 @@ function getRoute() {
   if (parts[0] === 'campaigns') {
     if (parts[1]) return { view: 'campaignDetail', campaignId: parts[1] };
     return { view: 'campaigns' };
+  }
+  if (parts[0] === 'trends') {
+    if (parts[1] === 'new') return { view: 'trendNew', campaignId: parts[2] || null };
+    if (parts[1]) return { view: 'trendDetail', trendId: parts[1] };
+    return { view: 'trends' };
   }
   if (parts[0] === 'project' && parts[1]) {
     if (parts[2] === 'used') return { view: 'projectUsed', projectId: parts[1] };
@@ -605,6 +753,27 @@ function getCampaignTotalDeployedPosts(campaign, pageCount) {
   return perPage * Math.max(1, pageCount || 1);
 }
 
+/** True if this specific post type is deployed (for Deployed checkbox). */
+function isPostTypeDeployed(campaign, projectId, postTypeId) {
+  const pid = typeof projectId === 'number' ? projectId : parseInt(projectId, 10);
+  const byPage = campaign.deployedByPage && campaign.deployedByPage[pid];
+  if (byPage === undefined || byPage === null) return !!campaign.deployed;
+  if (typeof byPage === 'boolean') return byPage;
+  return !!(byPage && byPage[postTypeId]);
+}
+
+/** True if any post type on this page is deployed (for page card badge). Pages with 0 post types are never deployed. */
+function isPageDeployed(campaign, projectId) {
+  const pid = typeof projectId === 'number' ? projectId : parseInt(projectId, 10);
+  const postTypesOnPage = (campaign.pagePostTypes && campaign.pagePostTypes[pid]) || (campaign.pageIds && campaign.pageIds.includes(pid) ? (campaign.postTypes || []) : []);
+  if (!Array.isArray(postTypesOnPage) || postTypesOnPage.length === 0) return false;
+  const byPage = campaign.deployedByPage && campaign.deployedByPage[pid];
+  if (byPage === undefined || byPage === null) return !!campaign.deployed;
+  if (typeof byPage === 'boolean') return byPage;
+  if (typeof byPage === 'object' && byPage !== null) return Object.values(byPage).some((x) => !!x);
+  return false;
+}
+
 function formatCalendarDate(dateStr) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -651,7 +820,7 @@ function renderDashboard() {
     main.innerHTML = `
       <section class="card dashboard-card">
         <div class="card-header dashboard-header">
-          <h1 class="dashboard-title">Pages</h1>
+          <h1 class="dashboard-title">Home Screen</h1>
         </div>
         <div class="pages-two-column">
           <div class="pages-column">
@@ -696,19 +865,22 @@ function renderDashboard() {
       campEl.innerHTML = campaignPages.length ? renderSection(campaignPages, sectionOrder) : '<p class="empty">No campaign pages.</p>';
     }
     document.getElementById('newProjectBtn').onclick = () => {
-      const name = prompt('Page name (e.g. account handle):', 'New page');
-      if (name == null) return;
-      apiCreateProject(name.trim()).then((p) => {
-        location.hash = `#/project/${p.id}`;
-        render();
+      showPrompt('Page name (e.g. account handle):', 'New page').then((name) => {
+        if (name == null || !name.trim()) return;
+        apiCreateProject(name.trim()).then((p) => {
+          location.hash = `#/project/${p.id}`;
+          render();
+        });
       });
     };
     main.querySelectorAll('[data-action="delete"]').forEach((btn) => {
       btn.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (!confirm('Delete this page and all its campaigns?')) return;
-        apiDeleteProject(btn.dataset.id).then(() => render());
+        showConfirm('Delete this page and all its campaigns?').then((ok) => {
+          if (!ok) return;
+          apiDeleteProject(btn.dataset.id).then(() => render());
+        });
       };
     });
   });
@@ -718,7 +890,7 @@ function renderProject(projectId) {
   const pid = projectId;
   Promise.all([apiProject(pid), apiCampaigns(pid)]).then(([project, campaigns]) => {
     if (!project) {
-      document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap"><a href="#/" class="nav-link">← Back to pages</a></p><p>Page not found.</p></section>';
+      document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap"><a href="#/" class="nav-link">← Back to Home Screen</a></p><p>Page not found.</p></section>';
       setBreadcrumb({ view: 'project', projectId: pid }, null, null);
       return;
     }
@@ -727,7 +899,7 @@ function renderProject(projectId) {
     const avatarImg = project.hasAvatar ? `<img src="${projectAvatarUrl(project.id)}" alt="" class="project-avatar-img" />` : '<span class="project-avatar-placeholder">No photo</span>';
     main.innerHTML = `
       <section class="card project-card">
-        <p class="back-link-wrap"><a href="#/" class="nav-link">← Back to pages</a></p>
+        <p class="back-link-wrap"><a href="#/" class="nav-link">← Back to Home Screen</a></p>
         <div class="card-header">
           <h1>${escapeHtml(project.name)}</h1>
         </div>
@@ -768,10 +940,14 @@ function renderProject(projectId) {
           <p class="hint" style="margin-bottom:12px;">Images moved here after being sent to Blotato. Download within 14 days or they will be deleted.</p>
           <a href="#/project/${project.id}/used" class="btn btn-secondary">View used images</a>
         </div>
+        <div class="project-content-section">
+          <h2 style="margin:0 0 8px 0;font-size:1.1rem;">${(project.pageType || 'recurring') === 'recurring' ? 'Your content' : 'Campaigns'}</h2>
+          <p class="hint" style="margin-bottom:12px;">${(project.pageType || 'recurring') === 'recurring' ? 'Upload content, set a schedule, and run—this page can post on its own. No campaign required. Or join a campaign to post with other pages.' : 'Campaigns this page belongs to.'}</p>
+        </div>
         <div class="campaign-list" id="campaignList"></div>
-        <div class="actions">
+        <div class="actions" style="flex-wrap:wrap;gap:8px;">
           ${(project.pageType || 'recurring') === 'recurring' ? '<button type="button" class="btn btn-primary" id="uploadPostsBtn">Upload posts</button>' : ''}
-          <button type="button" class="btn btn-primary" id="joinCampaignBtn">Join campaign</button>
+          <button type="button" class="btn ${(project.pageType || 'recurring') === 'recurring' ? 'btn-secondary' : 'btn-primary'}" id="joinCampaignBtn">Join campaign</button>
         </div>
       </section>
     `;
@@ -800,7 +976,7 @@ function renderProject(projectId) {
             setTimeout(() => { saveBlotatoBtn.textContent = 'Save'; }, 2000);
           }
         })
-        .catch((err) => alert(err.message || 'Failed to save'));
+        .catch((err) => showAlert(err.message || 'Failed to save'));
     };
     if (blotatoAccountInput) blotatoAccountInput.onblur = saveBlotatoAccount;
     if (saveBlotatoBtn) saveBlotatoBtn.onclick = saveBlotatoAccount;
@@ -819,7 +995,7 @@ function renderProject(projectId) {
             });
           }
           avatarInput.value = '';
-        }).catch((err) => alert(err.message || 'Upload failed'));
+        }).catch((err) => showAlert(err.message || 'Upload failed'));
       };
     }
     if (avatarPreview && project.hasAvatar) {
@@ -833,8 +1009,11 @@ function renderProject(projectId) {
       };
     }
     const list = document.getElementById('campaignList');
+    const isRecurring = (project.pageType || 'recurring') === 'recurring';
     if (!campaigns.length) {
-      list.innerHTML = '<p class="empty">No campaigns yet. Join a campaign to get started.</p>';
+      list.innerHTML = isRecurring
+        ? '<p class="empty">Upload posts to add content and run on your own schedule—no campaign needed. Or join a campaign to post with other pages.</p>'
+        : '<p class="empty">No campaigns yet. Join a campaign to get started.</p>';
     } else {
       const sorted = [...campaigns].sort((a, b) => {
         const da = a.releaseDate || '';
@@ -869,7 +1048,7 @@ function renderProject(projectId) {
         apiCreateCampaign(project.id, 'Recurring posts').then((campaign) => {
           location.hash = `#/campaign/${project.id}/${campaign.id}`;
           render();
-        }).catch((err) => alert(err.message || 'Failed to create'));
+        }).catch((err) => showAlert(err.message || 'Failed to create'));
       };
     }
     document.getElementById('joinCampaignBtn').onclick = () => {
@@ -879,14 +1058,16 @@ function renderProject(projectId) {
           return !ids.includes(project.id);
         });
         openJoinCampaignModal(project.id, joinable, () => render());
-      }).catch(() => alert('Failed to load campaigns'));
+      }).catch(() => showAlert('Failed to load campaigns'));
     };
     list.querySelectorAll('[data-action="delete-campaign"]').forEach((btn) => {
       btn.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (!confirm('Delete this campaign?')) return;
-        apiDeleteCampaign(project.id, btn.dataset.cid).then(() => render());
+        showConfirm('Delete this campaign?').then((ok) => {
+          if (!ok) return;
+          apiDeleteCampaign(project.id, btn.dataset.cid).then(() => render());
+        });
       };
     });
 
@@ -918,7 +1099,7 @@ function openFolderModal(projectId, campaignId, folderNum, folderLabel, onClose)
       });
       photos.querySelectorAll('.folder-modal-delete').forEach((btn) => {
         btn.onclick = () => {
-          apiDeleteFolderImage(projectId, campaignId, folderNum, btn.dataset.filename).then(refresh).catch(() => alert('Delete failed'));
+          apiDeleteFolderImage(projectId, campaignId, folderNum, btn.dataset.filename).then(refresh).catch(() => showAlert('Delete failed'));
         };
       });
     });
@@ -929,7 +1110,7 @@ function openFolderModal(projectId, campaignId, folderNum, folderLabel, onClose)
   addInput.onchange = (e) => {
     const files = e.target.files;
     if (!files?.length) return;
-    apiCampaignUpload(projectId, campaignId, folderNum, files).then(() => { refresh(); if (onClose) onClose(); }).catch(() => alert('Upload failed'));
+    apiCampaignUpload(projectId, campaignId, folderNum, files).then(() => { refresh(); if (onClose) onClose(); }).catch(() => showAlert('Upload failed'));
     addInput.value = '';
   };
 
@@ -945,7 +1126,7 @@ function renderProjectUsed(projectId) {
   const pid = projectId;
   Promise.all([apiProject(pid), apiProjectUsed(pid)]).then(([project, data]) => {
     if (!project) {
-      document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap"><a href="#/" class="nav-link">← Back to pages</a></p><p>Page not found.</p></section>';
+      document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap"><a href="#/" class="nav-link">← Back to Home Screen</a></p><p>Page not found.</p></section>';
       return;
     }
     setBreadcrumb({ view: 'projectUsed', projectId: pid }, project, null);
@@ -989,7 +1170,7 @@ function renderProjectUsed(projectId) {
       }
     }
   }).catch(() => {
-    document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap"><a href="#/" class="nav-link">← Back to pages</a></p><p>Could not load used images.</p></section>';
+    document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap"><a href="#/" class="nav-link">← Back to Home Screen</a></p><p>Could not load used images.</p></section>';
   });
 }
 
@@ -1016,8 +1197,8 @@ function renderMediaTypeSelector(pid, cid, ptId, project, campaign) {
   document.getElementById('mediaTypeConfirmBtn').onclick = () => {
     const sel = document.getElementById('mediaTypeSelect');
     const val = sel && sel.value;
-    if (!val) { alert('Please select a media type'); return; }
-    apiUpdatePostType(pid, cid, ptId, { mediaType: val }).then(() => render()).catch((err) => alert(err.message || 'Failed'));
+    if (!val) { showAlert('Please select a media type'); return; }
+    apiUpdatePostType(pid, cid, ptId, { mediaType: val }).then(() => render()).catch((err) => showAlert(err.message || 'Failed'));
   };
 }
 
@@ -1064,7 +1245,7 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
           </div>
         </div>
         <div class="campaign-page-header-right">
-          <label class="deploy-toggle"><input type="checkbox" id="deployed" ${campaign.deployed ? 'checked' : ''} /><span>Deployed</span></label>
+          <label class="deploy-toggle"><input type="checkbox" id="deployed" ${isPostTypeDeployed(campaign, pid, ptId) ? 'checked' : ''} /><span>Deployed</span></label>
         </div>
       </div>
     </section>
@@ -1130,22 +1311,23 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
     if (dropzone && input) {
       dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('dragover'); };
       dropzone.ondragleave = () => dropzone.classList.remove('dragover');
-      dropzone.ondrop = (e) => { e.preventDefault(); dropzone.classList.remove('dragover'); const files = e.dataTransfer.files; if (files?.length) apiCampaignUpload(pid, cid, num, files, ptId, 'video').then(updateFolderCounts).catch((err) => alert(err.message || 'Upload failed')); };
+      dropzone.ondrop = (e) => { e.preventDefault(); dropzone.classList.remove('dragover'); const files = e.dataTransfer.files; if (files?.length) apiCampaignUpload(pid, cid, num, files, ptId, 'video').then(updateFolderCounts).catch((err) => showAlert(err.message || 'Upload failed')); };
     }
-    if (input) input.onchange = (e) => { const files = e.target.files; if (files?.length) apiCampaignUpload(pid, cid, num, files, ptId, 'video').then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => alert(err.message || 'Upload failed')); };
+    if (input) input.onchange = (e) => { const files = e.target.files; if (files?.length) apiCampaignUpload(pid, cid, num, files, ptId, 'video').then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed')); };
   }
   document.getElementById('deployed').onchange = (e) => apiUpdateCampaign(pid, cid, { ...campaignData, deployed: e.target.checked }, ptId).then((c) => { campaignData = c; });
   const postTypeHeaderEl = document.getElementById('postTypeHeader');
   if (postTypeHeaderEl) postTypeHeaderEl.ondblclick = () => {
     const pt = (campaignData.postTypes || []).find((p) => p.id === ptId);
     const current = pt ? pt.name : ptId;
-    const name = prompt('Post type label:', current);
-    if (name != null && name.trim()) {
-      apiUpdatePostType(pid, cid, ptId, { name: name.trim() }).then((c) => {
-        campaignData = c;
-        if (postTypeHeaderEl) postTypeHeaderEl.textContent = name.trim();
-      }).catch((err) => alert(err.message || 'Failed'));
-    }
+    showPrompt('Post type label:', current).then((name) => {
+      if (name != null && name.trim()) {
+        apiUpdatePostType(pid, cid, ptId, { name: name.trim() }).then((c) => {
+          campaignData = c;
+          if (postTypeHeaderEl) postTypeHeaderEl.textContent = name.trim();
+        }).catch((err) => showAlert(err.message || 'Failed'));
+      }
+    });
   };
   const scheduleTimesEl = document.getElementById('scheduleTimes');
   scheduleTimesEl.querySelectorAll('.time-input').forEach((input) => { input.onchange = () => { campaignData.scheduleTimes = Array.from(document.querySelectorAll('.time-input')).map((i) => i.value || '10:00'); }; });
@@ -1171,12 +1353,14 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
     setTimeout(() => { status.textContent = ''; status.className = 'run-status'; }, 2000);
   };
   document.getElementById('clearUrlsBtn').onclick = () => {
-    if (!confirm('Clear all generated URLs?')) return;
-    apiClearCampaignUrls(pid, cid).then(() => {
-      document.getElementById('urlsPlaceholder').style.display = 'block';
-      document.getElementById('urlsPlaceholder').textContent = 'Run once to see URLs.';
-      document.getElementById('urlsList').innerHTML = '';
-      document.getElementById('copyAllUrls').style.display = 'none';
+    showConfirm('Clear all generated URLs?').then((ok) => {
+      if (!ok) return;
+      apiClearCampaignUrls(pid, cid).then(() => {
+        document.getElementById('urlsPlaceholder').style.display = 'block';
+        document.getElementById('urlsPlaceholder').textContent = 'Run once to see URLs.';
+        document.getElementById('urlsList').innerHTML = '';
+        document.getElementById('copyAllUrls').style.display = 'none';
+      });
     });
   };
   function showUrls(urls, base64Images = []) {
@@ -1240,7 +1424,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
             <h1 id="campaignName" class="campaign-detail-name-editable" title="Double-click to rename">${escapeHtml(campaign.name)}</h1>
             <h2 id="postTypeHeader" class="post-type-header-editable" title="Double-click to edit label">${escapeHtml((campaign.postTypes || []).find((p) => p.id === ptId)?.name || ptId)}</h2>
             <label class="deploy-toggle deploy-toggle-under-name">
-              <input type="checkbox" id="deployed" ${(campaign.deployedByPage && campaign.deployedByPage[pid]) || campaign.deployed ? 'checked' : ''} />
+              <input type="checkbox" id="deployed" ${isPostTypeDeployed(campaign, pid, ptId) ? 'checked' : ''} />
               <span>Deployed</span>
             </label>
           </div>
@@ -1279,7 +1463,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
               <div class="text-style-grid">
                 <label class="field"><span>X (%)</span><input type="number" data-folder="1" data-field="x" value="${(ts.x ?? 50)}" min="0" max="100" title="0 = center" /></label>
                 <label class="field"><span>Y (%)</span><input type="number" data-folder="1" data-field="y" value="${(ts.y ?? 92)}" min="0" max="100" title="0 = center" /></label>
-                <label class="field"><span>Size (%)</span><input type="number" data-folder="1" data-field="size" value="${((ts.fontSize ?? 0.06) * 100)}" min="1" max="100" step="0.5" /></label>
+                <label class="field"><span>Size (px)</span><input type="number" data-folder="1" data-field="size" value="${(ts.fontSize != null && ts.fontSize >= 12 && ts.fontSize <= 200) ? Math.round(ts.fontSize) : Math.max(12, Math.min(200, Math.round(720 * (Number(ts.fontSize) || 0.06))))}" min="12" max="200" step="1" title="Font size in pixels" /></label>
                 <label class="field"><span>Font</span><select data-folder="1" data-field="font" class="field-select">${(() => { const current = ts.font || 'Arial, sans-serif'; const fonts = AVAILABLE_FONTS.includes(current) ? AVAILABLE_FONTS : [current, ...AVAILABLE_FONTS]; return fonts.map((font) => `<option value="${escapeHtml(font)}" ${current === font ? 'selected' : ''}>${escapeHtml(font)}</option>`).join(''); })()}</select></label>
                 <label class="field"><span>Color</span><input type="text" data-folder="1" data-field="color" value="${escapeHtml(ts.color || 'white')}" /></label>
                 <label class="field"><span>Stroke</span><input type="number" data-folder="1" data-field="strokeWidth" value="${(ts.strokeWidth ?? 2)}" min="0" max="10" step="0.5" /></label>
@@ -1370,25 +1554,27 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
       e.preventDefault();
       dropzone.classList.remove('dragover');
       const files = e.dataTransfer.files;
-      if (files?.length) apiCampaignUpload(pid, cid, 1, files, ptId, 'video_text').then(updateFolderCounts).catch((err) => alert(err.message || 'Upload failed'));
+      if (files?.length) apiCampaignUpload(pid, cid, 1, files, ptId, 'video_text').then(updateFolderCounts).catch((err) => showAlert(err.message || 'Upload failed'));
     };
   }
   if (input) input.onchange = (e) => {
     const files = e.target.files;
-    if (files?.length) apiCampaignUpload(pid, cid, 1, files, ptId, 'video_text').then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => alert(err.message || 'Upload failed'));
+    if (files?.length) apiCampaignUpload(pid, cid, 1, files, ptId, 'video_text').then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed'));
   };
 
   document.getElementById('deployed').onchange = (e) => apiUpdateCampaign(pid, cid, { ...campaignData, deployed: e.target.checked }, ptId).then((c) => { campaignData = c; });
   const campaignNameEl = document.getElementById('campaignName');
   if (campaignNameEl) campaignNameEl.ondblclick = () => {
-    const name = prompt('Campaign name:', campaignData.name);
-    if (name != null && name.trim()) apiUpdateCampaign(pid, cid, { ...campaignData, name: name.trim() }, ptId).then((c) => { campaignData = c; if (campaignNameEl) campaignNameEl.textContent = c.name; });
+    showPrompt('Campaign name:', campaignData.name).then((name) => {
+      if (name != null && name.trim()) apiUpdateCampaign(pid, cid, { ...campaignData, name: name.trim() }, ptId).then((c) => { campaignData = c; if (campaignNameEl) campaignNameEl.textContent = c.name; });
+    });
   };
   const postTypeHeaderEl = document.getElementById('postTypeHeader');
   if (postTypeHeaderEl) postTypeHeaderEl.ondblclick = () => {
     const pt = (campaignData.postTypes || []).find((p) => p.id === ptId);
-    const name = prompt('Post type label:', pt ? pt.name : ptId);
-    if (name != null && name.trim()) apiUpdatePostType(pid, cid, ptId, { name: name.trim() }).then((c) => { campaignData = c; if (postTypeHeaderEl) postTypeHeaderEl.textContent = name.trim(); }).catch((err) => alert(err.message || 'Failed'));
+    showPrompt('Post type label:', pt ? pt.name : ptId).then((name) => {
+      if (name != null && name.trim()) apiUpdatePostType(pid, cid, ptId, { name: name.trim() }).then((c) => { campaignData = c; if (postTypeHeaderEl) postTypeHeaderEl.textContent = name.trim(); }).catch((err) => showAlert(err.message || 'Failed'));
+    });
   };
 
   const scheduleTimesEl = document.getElementById('scheduleTimes');
@@ -1427,20 +1613,31 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
     setTimeout(() => { status.textContent = ''; status.className = 'run-status'; }, 2000);
   };
 
-  document.getElementById('saveTextStyle').onclick = () => {
+  function getCurrentTextStylePerFolder() {
     const get = (field) => { const el = document.querySelector(`[data-folder="1"][data-field="${field}"]`); return el ? el.value : null; };
-    const sizeVal = parseFloat(get('size')) ?? 6;
-    const textStylePerFolder = [{
+    const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat(get('size')) || 48)));
+    return [{
       x: parseFloat(get('x')) ?? 50,
       y: parseFloat(get('y')) ?? 92,
-      fontSize: sizeVal / 100,
+      fontSize: sizePx,
       font: (get('font') || 'Arial, sans-serif').trim(),
       color: (get('color') || 'white').trim(),
       strokeWidth: parseFloat(get('strokeWidth')) ?? 2,
     }];
-    apiUpdateCampaign(pid, cid, { ...campaignData, textStylePerFolder }, ptId).then((c) => { campaignData = c; });
+  }
+
+  document.getElementById('saveTextStyle').onclick = () => {
+    const textStylePerFolder = getCurrentTextStylePerFolder();
     const status = document.getElementById('runStatus');
-    if (status) { status.textContent = 'Text styles saved.'; status.className = 'run-status success'; setTimeout(() => { status.textContent = ''; status.className = 'run-status'; }, 2000); }
+    apiUpdateCampaign(pid, cid, { ...campaignData, textStylePerFolder }, ptId)
+      .then((c) => {
+        campaignData = c;
+        if (status) { status.textContent = 'Text styles saved.'; status.className = 'run-status success'; setTimeout(() => { status.textContent = ''; status.className = 'run-status'; }, 2000); }
+      })
+      .catch((err) => {
+        if (status) { status.textContent = err.message || 'Failed to save'; status.className = 'run-status error'; }
+        showAlert(err?.message || 'Failed to save text styles.');
+      });
   };
 
   const videoEl = main.querySelector('.text-style-preview-video[data-folder="1"]');
@@ -1450,16 +1647,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
   main.querySelector('[data-refresh-preview="1"]').onclick = () => {
     if (previewAbortController) previewAbortController.abort();
     previewAbortController = new AbortController();
-    const get = (field) => { const el = document.querySelector(`[data-folder="1"][data-field="${field}"]`); return el ? el.value : null; };
-    const sizeVal = parseFloat(get('size')) ?? 6;
-    const textStylePerFolder = [{
-      x: parseFloat(get('x')) ?? 50,
-      y: parseFloat(get('y')) ?? 92,
-      fontSize: sizeVal / 100,
-      font: (get('font') || 'Arial, sans-serif').trim(),
-      color: (get('color') || 'white').trim(),
-      strokeWidth: parseFloat(get('strokeWidth')) ?? 2,
-    }];
+    const textStylePerFolder = getCurrentTextStylePerFolder();
     const textOptionsPerFolder = campaignData.textOptionsPerFolder || [[]];
     if (loadingEl) { loadingEl.style.display = 'block'; loadingEl.textContent = 'Generating preview…'; }
     if (placeholderEl) placeholderEl.style.display = 'none';
@@ -1482,27 +1670,16 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
   };
 
   document.getElementById('clearUrlsBtn').onclick = () => {
-    if (!confirm('Clear all generated URLs?')) return;
-    apiClearCampaignUrls(pid, cid).then(() => {
-      document.getElementById('urlsPlaceholder').style.display = 'block';
-      document.getElementById('urlsPlaceholder').textContent = 'Run once to see URLs.';
-      document.getElementById('urlsList').innerHTML = '';
-      document.getElementById('copyAllUrls').style.display = 'none';
+    showConfirm('Clear all generated URLs?').then((ok) => {
+      if (!ok) return;
+      apiClearCampaignUrls(pid, cid).then(() => {
+        document.getElementById('urlsPlaceholder').style.display = 'block';
+        document.getElementById('urlsPlaceholder').textContent = 'Run once to see URLs.';
+        document.getElementById('urlsList').innerHTML = '';
+        document.getElementById('copyAllUrls').style.display = 'none';
+      });
     });
   };
-
-  function getCurrentTextStylePerFolder() {
-    const get = (field) => { const el = document.querySelector(`[data-folder="1"][data-field="${field}"]`); return el ? el.value : null; };
-    const sizeVal = parseFloat(get('size')) ?? 6;
-    return [{
-      x: parseFloat(get('x')) ?? 50,
-      y: parseFloat(get('y')) ?? 92,
-      fontSize: sizeVal / 100,
-      font: (get('font') || 'Arial, sans-serif').trim(),
-      color: (get('color') || 'white').trim(),
-      strokeWidth: parseFloat(get('strokeWidth')) ?? 2,
-    }];
-  }
 
   function showUrls(urls, base64Images) {
     const placeholder = document.getElementById('urlsPlaceholder');
@@ -1606,7 +1783,7 @@ function renderPostTypeSelector(pid, cid, project, campaign) {
       const id = pts.length ? pts[pts.length - 1].id : null;
       if (id) location.hash = `#/campaign/${pid}/${cid}/pt/${encodeURIComponent(id)}`;
       else render();
-    }).catch((err) => alert(err.message || 'Failed'));
+    }).catch((err) => showAlert(err.message || 'Failed'));
   };
   if (addPostTypeModal) {
     if (!addPostTypeModal._closeSetup) {
@@ -1626,8 +1803,10 @@ function renderPostTypeSelector(pid, cid, project, campaign) {
       e.preventDefault();
       e.stopPropagation();
       const ptName = btn.dataset.ptName || 'this post type';
-      if (!confirm(`Delete post type "${ptName}"? This cannot be undone.`)) return;
-      apiDeletePostType(pid, cid, btn.dataset.ptId).then(() => render()).catch((err) => alert(err.message || 'Failed'));
+      showConfirm(`Delete post type "${ptName}"? This cannot be undone.`).then((ok) => {
+        if (!ok) return;
+        apiDeletePostType(pid, cid, btn.dataset.ptId).then(() => render()).catch((err) => showAlert(err.message || 'Failed'));
+      });
     };
   });
   main.querySelectorAll('.post-type-duplicate').forEach((btn) => {
@@ -1666,7 +1845,7 @@ function openDuplicatePostTypeModal(sourceProjectId, sourceCampaignId, postTypeI
   document.getElementById('duplicatePostTypeCancel').onclick = () => { modal.hidden = true; };
   document.getElementById('duplicatePostTypeConfirm').onclick = () => {
     const val = targetSelect.value;
-    if (!val) { alert('Select a campaign and page'); return; }
+    if (!val) { showAlert('Select a campaign and page'); return; }
     const [targetCampaignId, targetPageId] = val.split(':').map(Number);
     apiDuplicatePostType(sourceProjectId, sourceCampaignId, postTypeId, targetCampaignId, targetPageId)
       .then(() => {
@@ -1674,7 +1853,7 @@ function openDuplicatePostTypeModal(sourceProjectId, sourceCampaignId, postTypeI
         location.hash = `#/campaign/${targetPageId}/${targetCampaignId}`;
         render();
       })
-      .catch((err) => alert(err.message || 'Failed to duplicate'));
+      .catch((err) => showAlert(err.message || 'Failed to duplicate'));
   };
   modal.onclick = (e) => { if (e.target.id === 'duplicatePostTypeModal') modal.hidden = true; };
 }
@@ -1765,7 +1944,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
               <h1 id="campaignName" class="campaign-detail-name-editable" title="Double-click to rename">${escapeHtml(campaign.name)}</h1>
               <h2 id="postTypeHeader" class="post-type-header-editable post-type-name-centered" title="Double-click to edit label">${escapeHtml((campaign.postTypes || []).find((p) => p.id === ptId)?.name || ptId)}</h2>
               <label class="deploy-toggle deploy-toggle-under-name">
-                <input type="checkbox" id="deployed" ${(campaign.deployedByPage && campaign.deployedByPage[pid]) || campaign.deployed ? 'checked' : ''} />
+                <input type="checkbox" id="deployed" ${isPostTypeDeployed(campaign, pid, ptId) ? 'checked' : ''} />
                 <span>Deployed</span>
               </label>
             </div>
@@ -1807,7 +1986,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
                 <div class="text-style-grid">
                   <label class="field"><span>X (%)</span><input type="number" data-folder="${f}" data-field="x" value="${(ts.x ?? 50)}" min="0" max="100" title="0 = center" /></label>
                   <label class="field"><span>Y (%)</span><input type="number" data-folder="${f}" data-field="y" value="${(ts.y ?? 92)}" min="0" max="100" title="0 = center" /></label>
-                  <label class="field"><span>Size (%)</span><input type="number" data-folder="${f}" data-field="size" value="${((ts.fontSize ?? 0.06) * 100)}" min="1" max="100" step="0.5" /></label>
+                  <label class="field"><span>Size (px)</span><input type="number" data-folder="${f}" data-field="size" value="${(ts.fontSize != null && ts.fontSize >= 12 && ts.fontSize <= 200) ? Math.round(ts.fontSize) : Math.max(12, Math.min(200, Math.round(720 * (Number(ts.fontSize) || 0.06))))}" min="12" max="200" step="1" title="Font size in pixels" /></label>
                   <label class="field"><span>Font</span><select data-folder="${f}" data-field="font" class="field-select">${(() => { const current = ts.font || 'Arial, sans-serif'; const fonts = AVAILABLE_FONTS.includes(current) ? AVAILABLE_FONTS : [current, ...AVAILABLE_FONTS]; return fonts.map((font) => `<option value="${escapeHtml(font)}" ${current === font ? 'selected' : ''}>${escapeHtml(font)}</option>`).join(''); })()}</select></label>
                   <label class="field"><span>Color</span><input type="text" data-folder="${f}" data-field="color" value="${escapeHtml(ts.color || 'white')}" /></label>
                   <label class="field"><span>Stroke</span><input type="number" data-folder="${f}" data-field="strokeWidth" value="${(ts.strokeWidth ?? 2)}" min="0" max="10" step="0.5" /></label>
@@ -1913,27 +2092,29 @@ function renderCampaign(projectId, campaignId, postTypeId) {
           dropzone.classList.remove('dragover');
           const files = e.dataTransfer.files;
           if (!files?.length) return;
-          apiCampaignUpload(pid, cid, num, files, ptId).then(updateFolderCounts).catch((err) => alert(err.message || 'Upload failed'));
+          apiCampaignUpload(pid, cid, num, files, ptId).then(updateFolderCounts).catch((err) => showAlert(err.message || 'Upload failed'));
         };
       }
       if (input) input.onchange = (e) => {
         const files = e.target.files;
         if (!files?.length) return;
-        apiCampaignUpload(pid, cid, num, files, ptId).then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => alert(err.message || 'Upload failed'));
+        apiCampaignUpload(pid, cid, num, files, ptId).then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed'));
       };
       const deleteBtn = dropzone && dropzone.querySelector('.dropzone-delete');
       if (deleteBtn) deleteBtn.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (!confirm('Delete this folder and its photos?')) return;
-        apiDeleteFolder(pid, cid, num, ptId).then(() => render()).catch((err) => alert(err.message || 'Failed'));
+        showConfirm('Delete this folder and its photos?').then((ok) => {
+          if (!ok) return;
+          apiDeleteFolder(pid, cid, num, ptId).then(() => render()).catch((err) => showAlert(err.message || 'Failed'));
+        });
       };
     }
 
     const addFolderBtn = document.getElementById('addFolderBtn');
     if (addFolderBtn) {
       addFolderBtn.onclick = () => {
-        apiAddFolder(pid, cid, ptId).then(() => render()).catch((err) => alert(err.message || err.error || 'Failed to add folder'));
+        apiAddFolder(pid, cid, ptId).then(() => render()).catch((err) => showAlert(err.message || err.error || 'Failed to add folder'));
       };
     }
     const campAvatarImg = document.getElementById('campaignAvatarImg');
@@ -1950,30 +2131,32 @@ function renderCampaign(projectId, campaignId, postTypeId) {
         apiUploadCampaignAvatar(cid, file).then(() => {
           if (campAvatarImg) { campAvatarImg.src = campaignAvatarUrl(cid); campAvatarImg.style.display = ''; campAvatarPlaceholder && (campAvatarPlaceholder.style.display = 'none'); }
           campAvatarInput.value = '';
-        }).catch((err) => alert(err.message || 'Upload failed'));
+        }).catch((err) => showAlert(err.message || 'Upload failed'));
       };
     }
     const campaignNameEl = document.getElementById('campaignName');
     if (campaignNameEl) campaignNameEl.ondblclick = () => {
-      const name = prompt('Campaign name:', campaign.name);
-      if (name != null && name.trim()) {
-        apiUpdateCampaign(pid, cid, { ...campaign, name: name.trim() }, ptId).then((c) => {
-          campaign = c;
-          if (campaignNameEl) campaignNameEl.textContent = c.name;
-        });
-      }
+      showPrompt('Campaign name:', campaign.name).then((name) => {
+        if (name != null && name.trim()) {
+          apiUpdateCampaign(pid, cid, { ...campaign, name: name.trim() }, ptId).then((c) => {
+            campaign = c;
+            if (campaignNameEl) campaignNameEl.textContent = c.name;
+          });
+        }
+      });
     };
     const postTypeHeaderEl = document.getElementById('postTypeHeader');
     if (postTypeHeaderEl) postTypeHeaderEl.ondblclick = () => {
       const pt = (campaign.postTypes || []).find((p) => p.id === ptId);
       const current = pt ? pt.name : ptId;
-      const name = prompt('Post type label:', current);
-      if (name != null && name.trim()) {
-        apiUpdatePostType(pid, cid, ptId, { name: name.trim() }).then((c) => {
-          campaign = c;
-          if (postTypeHeaderEl) postTypeHeaderEl.textContent = name.trim();
-        }).catch((err) => alert(err.message || 'Failed'));
-      }
+      showPrompt('Post type label:', current).then((name) => {
+        if (name != null && name.trim()) {
+          apiUpdatePostType(pid, cid, ptId, { name: name.trim() }).then((c) => {
+            campaign = c;
+            if (postTypeHeaderEl) postTypeHeaderEl.textContent = name.trim();
+          }).catch((err) => showAlert(err.message || 'Failed'));
+        }
+      });
     };
     document.getElementById('deployed').onchange = (e) => {
       apiUpdateCampaign(pid, cid, { ...campaign, deployed: e.target.checked }, ptId).then((c) => { campaign = c; });
@@ -2034,19 +2217,26 @@ function renderCampaign(projectId, campaignId, postTypeId) {
           const el = document.querySelector(`[data-folder="${f}"][data-field="${field}"]`);
           return el ? el.value : null;
         };
-        const sizeVal = parseFloat(get('size')) ?? 6;
+        const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat(get('size')) || 48)));
         textStylePerFolder.push({
           x: parseFloat(get('x')) ?? 50,
           y: parseFloat(get('y')) ?? 92,
-          fontSize: sizeVal / 100,
+          fontSize: sizePx,
           font: (get('font') || 'Arial, sans-serif').trim(),
           color: (get('color') || 'white').trim(),
           strokeWidth: parseFloat(get('strokeWidth')) ?? 2,
         });
       }
-      apiUpdateCampaign(pid, cid, { ...campaign, textStylePerFolder }, ptId).then((c) => { campaign = c; });
       const status = document.getElementById('runStatus');
-      if (status) { status.textContent = 'Text styles saved.'; status.className = 'run-status success'; setTimeout(() => { status.textContent = ''; status.className = 'run-status'; }, 2000); }
+      apiUpdateCampaign(pid, cid, { ...campaign, textStylePerFolder }, ptId)
+        .then((c) => {
+          campaign = c;
+          if (status) { status.textContent = 'Text styles saved.'; status.className = 'run-status success'; setTimeout(() => { status.textContent = ''; status.className = 'run-status'; }, 2000); }
+        })
+        .catch((err) => {
+          if (status) { status.textContent = err.message || 'Failed to save text styles'; status.className = 'run-status error'; }
+          showAlert(err?.message || 'Failed to save text styles.');
+        });
     };
 
     const previewBlobUrls = {};
@@ -2062,11 +2252,11 @@ function renderCampaign(projectId, campaignId, postTypeId) {
         const el = document.querySelector(`[data-folder="${f}"][data-field="${field}"]`);
         return el ? el.value : null;
       };
-      const sizeVal = parseFloat(get('size')) ?? 6;
+      const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat(get('size')) || 48)));
       const textStyle = {
         x: parseFloat(get('x')) ?? 50,
         y: parseFloat(get('y')) ?? 92,
-        fontSize: sizeVal / 100,
+        fontSize: sizePx,
         font: (get('font') || 'Arial, sans-serif').trim(),
         color: (get('color') || 'white').trim(),
         strokeWidth: parseFloat(get('strokeWidth')) ?? 2,
@@ -2136,14 +2326,16 @@ function renderCampaign(projectId, campaignId, postTypeId) {
 
     const clearUrlsBtn = document.getElementById('clearUrlsBtn');
     if (clearUrlsBtn) clearUrlsBtn.onclick = () => {
-      if (!confirm('Clear all generated URLs?')) return;
-      apiClearCampaignUrls(pid, cid).then(() => {
-        const placeholder = document.getElementById('urlsPlaceholder');
-        const list = document.getElementById('urlsList');
-        const copyAllBtn = document.getElementById('copyAllUrls');
-        if (placeholder) { placeholder.style.display = 'block'; placeholder.textContent = 'Run once to see URLs.'; }
-        if (list) list.innerHTML = '';
-        if (copyAllBtn) copyAllBtn.style.display = 'none';
+      showConfirm('Clear all generated URLs?').then((ok) => {
+        if (!ok) return;
+        apiClearCampaignUrls(pid, cid).then(() => {
+          const placeholder = document.getElementById('urlsPlaceholder');
+          const list = document.getElementById('urlsList');
+          const copyAllBtn = document.getElementById('copyAllUrls');
+          if (placeholder) { placeholder.style.display = 'block'; placeholder.textContent = 'Run once to see URLs.'; }
+          if (list) list.innerHTML = '';
+          if (copyAllBtn) copyAllBtn.style.display = 'none';
+        });
       });
     };
 
@@ -2154,11 +2346,11 @@ function renderCampaign(projectId, campaignId, postTypeId) {
           const el = document.querySelector(`[data-folder="${f}"][data-field="${field}"]`);
           return el ? el.value : null;
         };
-        const sizeVal = parseFloat(get('size')) ?? 6;
+        const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat(get('size')) || 48)));
         textStylePerFolder.push({
           x: parseFloat(get('x')) ?? 50,
           y: parseFloat(get('y')) ?? 92,
-          fontSize: sizeVal / 100,
+          fontSize: sizePx,
           font: (get('font') || 'Arial, sans-serif').trim(),
           color: (get('color') || 'white').trim(),
           strokeWidth: parseFloat(get('strokeWidth')) ?? 2,
@@ -2259,15 +2451,17 @@ function renderCampaignFolderPhotos(projectId, campaignId, folderNum, postTypeId
         </div>
         <p class="hint">Add or remove images. One image is picked at random from this folder per run.</p>
         <div class="folder-photos-grid" id="folderPhotosGrid"></div>
-        <div class="folder-photos-actions" style="margin-top:1rem;">
+        <div class="folder-photos-actions" style="margin-top:1rem; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
           <input type="file" accept="image/*" multiple id="folderPhotosInput" hidden />
           <button type="button" class="btn btn-secondary" id="folderPhotosAddBtn">Add photos</button>
+          <button type="button" class="btn btn-ghost" id="folderPhotosClearBtn" data-action="clear-folder-photos">Clear folder</button>
         </div>
       </section>
     `;
     const grid = document.getElementById('folderPhotosGrid');
     const addInput = document.getElementById('folderPhotosInput');
     const addBtn = document.getElementById('folderPhotosAddBtn');
+    const clearBtn = document.getElementById('folderPhotosClearBtn');
 
     function refresh() {
       apiCampaignFolders(pid, cid, ptId).then((data) => {
@@ -2284,7 +2478,7 @@ function renderCampaignFolderPhotos(projectId, campaignId, folderNum, postTypeId
         });
         grid.querySelectorAll('.folder-photo-delete').forEach((btn) => {
           btn.onclick = () => {
-            apiDeleteFolderImage(pid, cid, fnum, btn.dataset.filename, ptId).then(refresh).catch(() => alert('Delete failed'));
+            apiDeleteFolderImage(pid, cid, fnum, btn.dataset.filename, ptId).then(refresh).catch(() => showAlert('Delete failed'));
           };
         });
       });
@@ -2295,13 +2489,30 @@ function renderCampaignFolderPhotos(projectId, campaignId, folderNum, postTypeId
     addInput.onchange = (e) => {
       const files = e.target.files;
       if (!files?.length) return;
-      apiCampaignUpload(pid, cid, fnum, files, ptId).then(refresh).catch(() => alert('Upload failed'));
+      apiCampaignUpload(pid, cid, fnum, files, ptId).then(refresh).catch(() => showAlert('Upload failed'));
       addInput.value = '';
     };
+    const card = main.querySelector('.card');
+    if (card) {
+      card.addEventListener('click', (e) => {
+        if (e.target.id !== 'folderPhotosClearBtn' && e.target.closest('[data-action="clear-folder-photos"]') === null) return;
+        e.preventDefault();
+        e.stopPropagation();
+        showConfirm('Delete all photos in this folder from the server? This cannot be undone.').then((ok) => {
+          if (!ok) return;
+          apiClearFolder(pid, cid, fnum, ptId).then((r) => {
+            refresh();
+            showAlert(r.deleted !== undefined ? `Cleared ${r.deleted} photo(s).` : 'Folder cleared.');
+          }).catch(() => showAlert('Failed to clear folder'));
+        });
+      });
+    }
     const deleteFolderBtn = document.getElementById('folderPhotosDeleteFolderBtn');
     if (deleteFolderBtn) deleteFolderBtn.onclick = () => {
-      if (!confirm(`Delete folder ${fnum} and its photos?`)) return;
-      apiDeleteFolder(pid, cid, fnum, ptId).then(() => { location.hash = `#/campaign/${pid}/${cid}/pt/${encodeURIComponent(ptId)}`; render(); }).catch((err) => alert(err.message || 'Failed'));
+      showConfirm(`Delete folder ${fnum} and its photos?`).then((ok) => {
+        if (!ok) return;
+        apiDeleteFolder(pid, cid, fnum, ptId).then(() => { location.hash = `#/campaign/${pid}/${cid}/pt/${encodeURIComponent(ptId)}`; render(); }).catch((err) => showAlert(err.message || 'Failed'));
+      });
     };
   });
 }
@@ -2334,12 +2545,14 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
         <div class="folder-photos-actions" style="margin-top:1rem;">
           <input type="file" accept="video/*" multiple id="folderVideosInput" hidden />
           <button type="button" class="btn btn-secondary" id="folderVideosAddBtn">Add videos</button>
+          <button type="button" class="btn btn-ghost" id="folderVideosClearBtn" data-action="clear-folder-videos">Clear folder</button>
         </div>
       </section>
     `;
     const grid = document.getElementById('folderVideosGrid');
     const addInput = document.getElementById('folderVideosInput');
     const addBtn = document.getElementById('folderVideosAddBtn');
+    const clearBtn = document.getElementById('folderVideosClearBtn');
 
     function refresh() {
       apiCampaignFolders(pid, cid, ptId).then((data) => {
@@ -2356,7 +2569,7 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
         });
         grid.querySelectorAll('.folder-photo-delete').forEach((btn) => {
           btn.onclick = () => {
-            apiDeleteFolderMedia(pid, cid, fnum, btn.dataset.filename, ptId).then(refresh).catch(() => alert('Delete failed'));
+            apiDeleteFolderMedia(pid, cid, fnum, btn.dataset.filename, ptId).then(refresh).catch(() => showAlert('Delete failed'));
           };
         });
       });
@@ -2368,9 +2581,24 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
       const files = e.target.files;
       if (!files?.length) return;
       const mediaType = campaign.mediaType === 'video_text' ? 'video_text' : 'video';
-      apiCampaignUpload(pid, cid, fnum, files, ptId, mediaType).then(refresh).catch(() => alert('Upload failed'));
+      apiCampaignUpload(pid, cid, fnum, files, ptId, mediaType).then(refresh).catch(() => showAlert('Upload failed'));
       addInput.value = '';
     };
+    const cardVideos = main.querySelector('.card');
+    if (cardVideos) {
+      cardVideos.addEventListener('click', (e) => {
+        if (e.target.id !== 'folderVideosClearBtn' && e.target.closest('[data-action="clear-folder-videos"]') === null) return;
+        e.preventDefault();
+        e.stopPropagation();
+        showConfirm('Delete all videos in this folder from the server and Supabase? This cannot be undone.').then((ok) => {
+          if (!ok) return;
+          apiClearFolder(pid, cid, fnum, ptId).then((r) => {
+            refresh();
+            showAlert(r.deleted !== undefined ? `Cleared ${r.deleted} video(s).` : 'Folder cleared.');
+          }).catch(() => showAlert('Failed to clear folder'));
+        });
+      });
+    }
   });
 }
 
@@ -2388,16 +2616,17 @@ function renderCampaignFolderText(projectId, campaignId, folderNum, postTypeId) 
     setBreadcrumb({ view: 'campaignFolder', projectId: pid, campaignId: cid, folderNum }, project, campaign, folderNum);
     const textOptionsPerFolder = campaign.textOptionsPerFolder || [];
     const opts = textOptionsPerFolder[fnum - 1] || [];
+    const textUsage = {};
     const main = document.getElementById('main');
     main.innerHTML = `
-      <section class="card">
+      <section class="card" id="folderTextOptionsCard">
         <p class="back-link-wrap"><a href="#/campaign/${pid}/${cid}/pt/${encodeURIComponent(ptId)}" class="nav-link">← Back to post type</a></p>
         <h1>Folder ${fnum} – on-screen text options</h1>
         <p class="hint">One option is chosen at random per image from this folder.</p>
         <ul class="text-options-list" id="folderTextList"></ul>
         <div class="text-options-actions">
-          <input type="text" id="folderNewText" placeholder="Add option…" />
-          <button type="button" class="btn btn-secondary" id="folderAddBtn">Add</button>
+          <textarea id="folderNewText" class="folder-text-bubble-input" placeholder="New option… (Shift+Enter for new line)" rows="2" style="resize:none;min-height:44px;"></textarea>
+          <button type="button" class="btn btn-secondary folder-add-bubble" id="folderAddBtn" name="folderAddBtn">Add</button>
         </div>
       </section>
     `;
@@ -2418,12 +2647,20 @@ function renderCampaignFolderText(projectId, campaignId, folderNum, postTypeId) 
     function renderList(options) {
       if (!list) return;
       const arr = options || [];
-      list.innerHTML = arr.map((text, i) => `
-        <li>
-          <span>${escapeHtml(text)}</span>
-          <button type="button" aria-label="Remove" data-index="${i}">×</button>
+      const countEl = document.getElementById('folderTextOptionsCount');
+      if (countEl) {
+        countEl.textContent = `${arr.length} text option${arr.length !== 1 ? 's' : ''}`;
+      }
+      list.innerHTML = arr.map((text, i) => {
+        const count = textUsage[`${fnum}:${i}`] || 0;
+        return `
+        <li class="folder-text-option-pill">
+          <span class="folder-text-option-text">${escapeHtml(text)}</span>
+          ${count > 0 ? `<span class="folder-photo-usage-badge" title="Times used">${count}</span>` : ''}
+          <button type="button" class="folder-text-option-remove" aria-label="Remove" data-index="${i}">×</button>
         </li>
-      `).join('');
+      `;
+      }).join('');
       list.querySelectorAll('button').forEach((btn) => {
         btn.onclick = () => {
           const idx = parseInt(btn.getAttribute('data-index'), 10);
@@ -2446,19 +2683,21 @@ function renderCampaignFolderText(projectId, campaignId, folderNum, postTypeId) 
                 renderList(campaign.textOptionsPerFolder[fnum - 1] || []);
               }
             })
-            .catch((err) => { alert(err?.message || 'Failed to save. Try again.'); });
+            .catch((err) => { showAlert(err?.message || 'Failed to save. Try again.'); });
         };
       });
     }
     renderList(opts);
 
-    addBtn.onclick = () => {
+    function submitNewOption() {
       const v = (newInput && newInput.value.trim()) || '';
       if (!v) return;
-      const newPerFolder = [...(campaign.textOptionsPerFolder || [])];
-      while (newPerFolder.length < fnum) newPerFolder.push([]);
-      newPerFolder[fnum - 1] = [...(newPerFolder[fnum - 1] || []), v];
-      apiUpdateCampaign(pid, cid, { ...campaign, textOptionsPerFolder: newPerFolder }, ptId)
+      const current = campaign.textOptionsPerFolder || [];
+      const newPerFolder = current.length >= fnum ? [...current] : [...current, ...Array(fnum - current.length).fill(null).map(() => [])];
+      const folderOpts = Array.isArray(newPerFolder[fnum - 1]) ? [...newPerFolder[fnum - 1]] : [];
+      folderOpts.push(v);
+      newPerFolder[fnum - 1] = folderOpts;
+      apiUpdateCampaign(pid, cid, { textOptionsPerFolder: newPerFolder }, ptId)
         .then((c) => {
           campaign = applyCampaignResponse(c);
           renderList(campaign.textOptionsPerFolder[fnum - 1] || []);
@@ -2471,9 +2710,27 @@ function renderCampaignFolderText(projectId, campaignId, folderNum, postTypeId) 
             renderList(campaign.textOptionsPerFolder[fnum - 1] || []);
           }
         })
-        .catch((err) => { alert(err?.message || 'Failed to save. Try again.'); });
-    };
-    if (newInput) newInput.onkeydown = (e) => { if (e.key === 'Enter') addBtn.click(); };
+        .catch((err) => { showAlert(err?.message || 'Failed to save. Try again.'); });
+    }
+    const card = document.getElementById('folderTextOptionsCard');
+    if (card) {
+      card.addEventListener('click', (e) => {
+        const isAddBtn = e.target.id === 'folderAddBtn' || e.target.closest('#folderAddBtn');
+        if (isAddBtn) {
+          e.preventDefault();
+          e.stopPropagation();
+          submitNewOption();
+        }
+      });
+      card.addEventListener('keydown', (e) => {
+        if (e.target.id !== 'folderNewText') return;
+        if (e.key !== 'Enter') return;
+        if (e.shiftKey) return;
+        e.preventDefault();
+        e.stopPropagation();
+        submitNewOption();
+      }, true);
+    }
   });
 }
 
@@ -2499,12 +2756,12 @@ function openNewCampaignModal(projects, onSuccess) {
     if (e) e.preventDefault();
     const name = nameInput.value.trim() || 'New campaign';
     const ids = Array.from(pagesDiv.querySelectorAll('input:checked')).map((cb) => parseInt(cb.dataset.pageId, 10));
-    if (!ids.length) { alert('Select at least one page'); return; }
+    if (!ids.length) { showAlert('Select at least one page'); return; }
     apiCreateCampaignWithPages(name, ids).then((c) => {
       close();
       location.hash = `#/campaigns/${c.id}`;
       if (onSuccess) onSuccess();
-    }).catch((err) => alert(err.message || 'Failed to create campaign'));
+    }).catch((err) => showAlert(err.message || 'Failed to create campaign'));
   };
   const form = document.getElementById('newCampaignForm');
   if (form) form.onsubmit = doCreate;
@@ -2574,8 +2831,10 @@ function renderCampaigns() {
         e.preventDefault();
         e.stopPropagation();
         const name = btn.dataset.cname || 'this campaign';
-        if (!confirm(`Delete campaign "${name}"? This cannot be undone.`)) return;
-        apiDeleteCampaignById(btn.dataset.cid).then(() => render()).catch((err) => alert(err.message || 'Failed to delete'));
+        showConfirm(`Delete campaign "${name}"? This cannot be undone.`).then((ok) => {
+          if (!ok) return;
+          apiDeleteCampaignById(btn.dataset.cid).then(() => render()).catch((err) => showAlert(err.message || 'Failed to delete'));
+        });
       };
     });
   });
@@ -2587,7 +2846,8 @@ function renderCampaignDetail(campaignId) {
     apiProjects(),
     apiAllCampaigns(),
     apiDeployedPostsCount(campaignId).catch(() => ({ count: 0, byPage: {} })),
-  ]).then(([projects, campaigns, countData]) => {
+    apiTrends(cid).catch(() => []),
+  ]).then(([projects, campaigns, countData, campaignTrends]) => {
     let campaign = campaigns.find((c) => String(c.id) === String(cid));
     if (!campaign) {
       document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap back-link-wrap-centered"><a href="#/campaigns" class="nav-link">← Back to campaigns</a></p><p>Campaign not found.</p></section>';
@@ -2626,9 +2886,27 @@ function renderCampaignDetail(campaignId) {
               <button type="button" class="btn btn-secondary" id="addCampaignDateRangeBtn" title="Set campaign date range">${(campaign.campaignStartDate || campaign.campaignEndDate) ? 'Change campaign dates' : 'Campaign dates'}</button>
               <button type="button" class="btn btn-secondary" id="addPageToCampaignBtn" title="Add page to campaign">+ Add page</button>
             </div>
+            <div class="campaign-notes-wrap">
+              <label class="field campaign-notes-label">
+                <span>Notes</span>
+                <textarea id="campaignNotes" class="campaign-notes-input" placeholder="Add notes about this campaign…" rows="3">${escapeHtml(campaign.notes || '')}</textarea>
+              </label>
+              <button type="button" class="btn btn-secondary btn-sm" id="campaignNotesSave">Save notes</button>
+            </div>
           </div>
         </div>
-        <div class="campaign-pages-grid" id="campaignPagesGrid"></div>
+        <div class="campaign-pages-ugc-sections">
+          <div class="campaign-ugc-section" id="campaignUgcSongSection">
+            <h3 class="settings-subtitle">UGC (song related)</h3>
+            <p class="hint">Pages that create content tied to the song or release.</p>
+            <div class="campaign-pages-grid" id="campaignPagesGridSong"></div>
+          </div>
+          <div class="campaign-ugc-section" id="campaignUgcNotSection">
+            <h3 class="settings-subtitle">UGC (not related)</h3>
+            <p class="hint">Pages that create general or non-song UGC for this campaign.</p>
+            <div class="campaign-pages-grid" id="campaignPagesGridNot"></div>
+          </div>
+        </div>
         <div class="campaign-detail-team-section" id="campaignTeamSection">
           <h3 class="settings-subtitle">Team members</h3>
           <p class="hint">Add people by username so they can access this campaign.</p>
@@ -2639,15 +2917,40 @@ function renderCampaignDetail(campaignId) {
           <p id="campaignTeamError" class="auth-error" hidden></p>
           <ul id="campaignTeamList" class="settings-team-list"></ul>
         </div>
+        <div class="campaign-detail-trends-section" id="campaignTrendsSection" data-campaign-id="${escapeHtml(String(cid))}">
+          <h3 class="settings-subtitle">Trends</h3>
+          <p class="hint">Add trends for your AI influencers. Each trend has its own pages, photos, schedule, and on-screen text.</p>
+          <div class="campaign-trends-list" id="campaignTrendsList"></div>
+          <div class="actions" style="margin-top:0.75rem;">
+            <button type="button" class="btn btn-secondary" id="campaignAddTrendBtn" data-action="add-trend">+ Add trend</button>
+          </div>
+        </div>
       </section>
     `;
-    const grid = document.getElementById('campaignPagesGrid');
-    grid.innerHTML = pages.map((p) => {
-      const pageDeployed = campaign.deployedByPage?.[p.id] ?? campaign.deployed;
+    const pageUgcTypes = campaign.pageUgcTypes && typeof campaign.pageUgcTypes === 'object' ? campaign.pageUgcTypes : {};
+    const songRelatedPages = pages.filter((p) => pageUgcTypes[p.id] !== 'not_related');
+    const notRelatedPages = pages.filter((p) => pageUgcTypes[p.id] === 'not_related');
+    function campaignPayload(overrides) {
+      return {
+        name: campaign.name,
+        pageIds,
+        releaseDate: campaign.releaseDate,
+        releaseType: campaign.releaseType,
+        campaignStartDate: campaign.campaignStartDate,
+        campaignEndDate: campaign.campaignEndDate,
+        memberUsernames: campaign.memberUsernames || [],
+        notes: campaign.notes ?? '',
+        pageUgcTypes: campaign.pageUgcTypes || {},
+        ...overrides,
+      };
+    }
+    function renderPageCard(p) {
+      const pageDeployed = isPageDeployed(campaign, p.id);
       const deployedBadge = pageDeployed ? '<span class="badge badge-deployed">Deployed</span>' : '<span class="badge badge-draft">Draft</span>';
       const postTypeCount = ((campaign.pagePostTypes || {})[p.id] || campaign.postTypes || []).length;
       const postsForPage = deployedByPage[p.id] ?? 0;
       const avatarImg = p.hasAvatar ? `<img src="${projectAvatarUrl(p.id)}" alt="" class="project-avatar-img" />` : `<span class="project-circle-initial">${(p.name || 'P').charAt(0).toUpperCase()}</span>`;
+      const ugcType = pageUgcTypes[p.id] === 'not_related' ? 'not_related' : 'song_related';
       return `
         <div class="campaign-page-card-wrap">
           <a href="#/campaign/${p.id}/${cid}" class="campaign-page-card">
@@ -2656,10 +2959,50 @@ function renderCampaignDetail(campaignId) {
             <span class="campaign-page-meta">${postTypeCount} post type${postTypeCount !== 1 ? 's' : ''} · ${pageDeployed ? `${postsForPage} deployed posts` : '0 deployed posts'}</span>
             ${deployedBadge}
           </a>
+          <label class="campaign-page-ugc-label">
+            <span class="campaign-page-ugc-label-text">UGC type</span>
+            <select class="campaign-page-ugc-select field-select" data-page-id="${p.id}" aria-label="UGC type">
+              <option value="song_related" ${ugcType === 'song_related' ? 'selected' : ''}>Song related</option>
+              <option value="not_related" ${ugcType === 'not_related' ? 'selected' : ''}>Not related</option>
+            </select>
+          </label>
           <button type="button" class="btn btn-ghost campaign-page-remove" data-page-id="${p.id}" data-page-name="${escapeHtml(p.name)}" aria-label="Remove from campaign">🗑</button>
         </div>
       `;
-    }).join('');
+    }
+    const gridSong = document.getElementById('campaignPagesGridSong');
+    const gridNot = document.getElementById('campaignPagesGridNot');
+    if (gridSong) gridSong.innerHTML = songRelatedPages.length ? songRelatedPages.map(renderPageCard).join('') : '<p class="hint">No pages in this category. Use the UGC type dropdown on a page above to move it here.</p>';
+    if (gridNot) gridNot.innerHTML = notRelatedPages.length ? notRelatedPages.map(renderPageCard).join('') : '<p class="hint">No pages in this category. Use the UGC type dropdown on a page above to move it here.</p>';
+    [gridSong, gridNot].filter(Boolean).forEach((grid) => {
+      grid.querySelectorAll('.campaign-page-ugc-select').forEach((sel) => {
+        sel.onchange = (e) => {
+          e.stopPropagation();
+          const pageId = parseInt(sel.dataset.pageId, 10);
+          const value = sel.value === 'song_related' ? 'song_related' : 'not_related';
+          const next = { ...(campaign.pageUgcTypes || {}), [pageId]: value };
+          apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(campaignPayload({ pageUgcTypes: next })) })
+            .then((r) => r.json())
+            .then((c) => { campaign = c; renderCampaignDetail(cid); })
+            .catch((err) => showAlert(err.message || 'Failed to update'));
+        };
+        sel.onclick = (e) => e.stopPropagation();
+      });
+      grid.querySelectorAll('.campaign-page-remove').forEach((btn) => {
+        btn.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const pageName = btn.dataset.pageName || 'this page';
+          showConfirm(`Are you sure you want to remove "${pageName}" from the campaign?`).then((ok) => {
+            if (!ok) return;
+            const removeId = parseInt(btn.dataset.pageId, 10);
+            const newPageIds = pageIds.filter((id) => id !== removeId);
+            if (newPageIds.length === 0) { showAlert('Campaign must have at least one page.'); return; }
+            apiUpdateCampaignPages(cid, newPageIds).then(() => renderCampaignDetail(cid)).catch((err) => showAlert(err.message || 'Failed'));
+          });
+        };
+      });
+    });
 
     const avatarImg = document.getElementById('campaignDetailAvatar');
     const avatarPlaceholder = document.getElementById('campaignDetailAvatarPlaceholder');
@@ -2679,7 +3022,7 @@ function renderCampaignDetail(campaignId) {
         apiUploadCampaignAvatar(cid, file).then(() => {
           if (avatarImg) { avatarImg.src = campaignAvatarUrl(cid); avatarImg.style.display = ''; avatarPlaceholder && (avatarPlaceholder.style.display = 'none'); }
           avatarInput.value = '';
-        }).catch((err) => alert(err.message || 'Upload failed'));
+        }).catch((err) => showAlert(err.message || 'Upload failed'));
       };
     }
     if (avatarClickable) {
@@ -2695,12 +3038,13 @@ function renderCampaignDetail(campaignId) {
     }
     const nameEl = document.getElementById('campaignDetailName');
     if (nameEl) nameEl.ondblclick = () => {
-      const name = prompt('Campaign name:', campaign.name);
-      if (name != null && name.trim()) {
-        apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim(), pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, memberUsernames: campaign.memberUsernames || [] }) })
-          .then((r) => r.json())
-          .then((c) => { campaign = c; if (nameEl) nameEl.textContent = c.name; });
-      }
+      showPrompt('Campaign name:', campaign.name).then((name) => {
+        if (name != null && name.trim()) {
+          apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim(), pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, memberUsernames: campaign.memberUsernames || [], notes: campaign.notes ?? '' }) })
+            .then((r) => r.json())
+            .then((c) => { campaign = c; if (nameEl) nameEl.textContent = c.name; });
+        }
+      });
     };
     const addReleaseBtn = document.getElementById('addReleaseDayBtn');
     const releaseDateEl = document.getElementById('campaignDetailReleaseDate');
@@ -2718,7 +3062,7 @@ function renderCampaignDetail(campaignId) {
       e.stopPropagation();
       const input = document.getElementById('releaseDayInput');
       const val = input?.value?.trim() || null;
-      apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: val, releaseType: campaign.releaseType, memberUsernames: campaign.memberUsernames || [] }) })
+      apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: val, releaseType: campaign.releaseType, memberUsernames: campaign.memberUsernames || [], notes: campaign.notes ?? '' }) })
         .then((r) => { if (!r.ok) throw new Error('Save failed'); return r.json(); })
         .then((c) => {
           campaign = c;
@@ -2729,7 +3073,7 @@ function renderCampaignDetail(campaignId) {
           }
           if (addReleaseBtn) addReleaseBtn.textContent = c.releaseDate ? 'Change release day' : 'Add release day';
         })
-        .catch((err) => alert(err.message || 'Failed to save release date'));
+        .catch((err) => showAlert(err.message || 'Failed to save release date'));
     };
     document.getElementById('releaseDayModal').onclick = (e) => { if (e.target.id === 'releaseDayModal') document.getElementById('releaseDayModal').hidden = true; };
     const addCampaignDateRangeBtn = document.getElementById('addCampaignDateRangeBtn');
@@ -2748,7 +3092,7 @@ function renderCampaignDetail(campaignId) {
       const endInput = document.getElementById('campaignEndDateInput');
       const startVal = startInput?.value?.trim() || null;
       const endVal = endInput?.value?.trim() || null;
-      apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, campaignStartDate: startVal, campaignEndDate: endVal, memberUsernames: campaign.memberUsernames || [] }) })
+      apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, campaignStartDate: startVal, campaignEndDate: endVal, memberUsernames: campaign.memberUsernames || [], notes: campaign.notes ?? '' }) })
         .then((r) => { if (!r.ok) throw new Error('Save failed'); return r.json(); })
         .then((c) => {
           campaign = c;
@@ -2759,21 +3103,32 @@ function renderCampaignDetail(campaignId) {
             campaignDetailDateRange.textContent = 'Campaign Dates: ' + ((c.campaignStartDate && c.campaignEndDate) ? `${formatReleaseDate(c.campaignStartDate)} – ${formatReleaseDate(c.campaignEndDate)}` : (c.campaignStartDate ? formatReleaseDate(c.campaignStartDate) : c.campaignEndDate ? formatReleaseDate(c.campaignEndDate) : ''));
           }
         })
-        .catch((err) => alert(err.message || 'Failed to save'));
+        .catch((err) => showAlert(err.message || 'Failed to save'));
     };
     if (campaignDateRangeModal) campaignDateRangeModal.onclick = (e) => { if (e.target.id === 'campaignDateRangeModal') campaignDateRangeModal.hidden = true; };
     const releaseTypeSelect = document.getElementById('campaignReleaseTypeSelect');
     if (releaseTypeSelect) {
       releaseTypeSelect.onchange = () => {
         const val = releaseTypeSelect.value || null;
-        apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: val, memberUsernames: campaign.memberUsernames || [] }) })
+        apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: val, memberUsernames: campaign.memberUsernames || [], notes: campaign.notes ?? '' }) })
           .then((r) => { if (!r.ok) throw new Error('Save failed'); return r.json(); })
           .then((c) => { campaign = c; });
       };
     }
+    const campaignNotesEl = document.getElementById('campaignNotes');
+    const campaignNotesSaveBtn = document.getElementById('campaignNotesSave');
+    if (campaignNotesSaveBtn && campaignNotesEl) {
+      campaignNotesSaveBtn.onclick = () => {
+        const notes = (campaignNotesEl.value || '').trim();
+        apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, campaignStartDate: campaign.campaignStartDate, campaignEndDate: campaign.campaignEndDate, memberUsernames: campaign.memberUsernames || [], notes }) })
+          .then((r) => { if (!r.ok) throw new Error('Save failed'); return r.json(); })
+          .then((c) => { campaign = c; showAlert('Notes saved.'); })
+          .catch((err) => showAlert(err.message || 'Failed to save notes'));
+      };
+    }
     document.getElementById('addPageToCampaignBtn').onclick = () => {
       const available = projects.filter((p) => !pageIds.includes(p.id));
-      if (!available.length) { alert('All pages are already in this campaign.'); return; }
+      if (!available.length) { showAlert('All pages are already in this campaign.'); return; }
       openAddPageModal(cid, pageIds, available, () => renderCampaignDetail(cid));
     };
     grid.querySelectorAll('.campaign-page-remove').forEach((btn) => {
@@ -2781,11 +3136,13 @@ function renderCampaignDetail(campaignId) {
         e.preventDefault();
         e.stopPropagation();
         const pageName = btn.dataset.pageName || 'this page';
-        if (!confirm(`Are you sure you want to remove "${pageName}" from the campaign?`)) return;
-        const removeId = parseInt(btn.dataset.pageId, 10);
-        const newPageIds = pageIds.filter((id) => id !== removeId);
-        if (newPageIds.length === 0) { alert('Campaign must have at least one page.'); return; }
-        apiUpdateCampaignPages(cid, newPageIds).then(() => renderCampaignDetail(cid)).catch((err) => alert(err.message || 'Failed'));
+        showConfirm(`Are you sure you want to remove "${pageName}" from the campaign?`).then((ok) => {
+          if (!ok) return;
+          const removeId = parseInt(btn.dataset.pageId, 10);
+          const newPageIds = pageIds.filter((id) => id !== removeId);
+          if (newPageIds.length === 0) { showAlert('Campaign must have at least one page.'); return; }
+          apiUpdateCampaignPages(cid, newPageIds).then(() => renderCampaignDetail(cid)).catch((err) => showAlert(err.message || 'Failed'));
+        });
       };
     });
 
@@ -2805,7 +3162,7 @@ function renderCampaignDetail(campaignId) {
         if (!username) return;
         if (campaignTeamError) campaignTeamError.hidden = true;
         const next = [...(campaign.memberUsernames || []), username];
-        apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, campaignStartDate: campaign.campaignStartDate, campaignEndDate: campaign.campaignEndDate, memberUsernames: next }) })
+        apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, campaignStartDate: campaign.campaignStartDate, campaignEndDate: campaign.campaignEndDate, memberUsernames: next, notes: campaign.notes ?? '' }) })
           .then((r) => r.json())
           .then((c) => { campaign = c; campaignTeamUsername.value = ''; renderCampaignDetail(cid); })
           .catch((err) => { if (campaignTeamError) { campaignTeamError.textContent = err.message || 'Failed'; campaignTeamError.hidden = false; } });
@@ -2817,11 +3174,63 @@ function renderCampaignDetail(campaignId) {
         if (idx === undefined) return;
         const list = campaign.memberUsernames || [];
         const next = list.filter((_, i) => String(i) !== String(idx));
-        apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, campaignStartDate: campaign.campaignStartDate, campaignEndDate: campaign.campaignEndDate, memberUsernames: next }) })
+        apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, campaignStartDate: campaign.campaignStartDate, campaignEndDate: campaign.campaignEndDate, memberUsernames: next, notes: campaign.notes ?? '' }) })
           .then((r) => r.json())
           .then((c) => { campaign = c; renderCampaignDetail(cid); })
-          .catch((err) => alert(err.message || 'Failed'));
+          .catch((err) => showAlert(err.message || 'Failed'));
       };
+    }
+
+    const campaignTrendsList = document.getElementById('campaignTrendsList');
+    const trends = Array.isArray(campaignTrends) ? campaignTrends : [];
+    if (campaignTrendsList) {
+      if (!trends.length) {
+        campaignTrendsList.innerHTML = '<p class="hint">No trends yet. Add a trend to run scheduled posts across pages with shared text.</p>';
+      } else {
+        const sorted = [...trends].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        campaignTrendsList.innerHTML = sorted.map((t) => `
+          <div class="campaigns-list-item">
+            <a href="#/trends/${t.id}" class="campaign-card-link">
+              <div class="list-card">
+                <div class="list-card-main">
+                  <span class="list-card-title">${escapeHtml(t.name)}</span>
+                  <span class="list-card-meta">${(t.pageIds && t.pageIds.length) ? t.pageIds.length + ' page(s)' : 'No pages'}</span>
+                </div>
+              </div>
+            </a>
+            <button type="button" class="btn btn-ghost btn-sm list-card-action" data-action="delete-campaign-trend" data-tid="${t.id}" data-tname="${escapeHtml(t.name)}" aria-label="Delete">Delete</button>
+          </div>
+        `).join('');
+        campaignTrendsList.querySelectorAll('[data-action="delete-campaign-trend"]').forEach((btn) => {
+          btn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const name = btn.dataset.tname || 'this trend';
+            showConfirm(`Delete trend "${name}"? This cannot be undone.`).then((ok) => {
+              if (!ok) return;
+              apiDeleteTrend(btn.dataset.tid).then(() => renderCampaignDetail(cid)).catch((err) => showAlert(err.message || 'Failed to delete'));
+            });
+          };
+        });
+      }
+    }
+    const trendsSection = document.getElementById('campaignTrendsSection');
+    if (trendsSection) {
+      const goToNewTrend = () => {
+        try {
+          sessionStorage.setItem('newTrendContext', JSON.stringify({ campaignId: cid, defaultPageIds: pageIds }));
+        } catch (_) {}
+        window.location.hash = `#/trends/new/${cid}`;
+        render();
+      };
+      trendsSection.addEventListener('click', (e) => {
+        if (e.target.id !== 'campaignAddTrendBtn' && !e.target.closest('[data-action="add-trend"]')) return;
+        e.preventDefault();
+        e.stopPropagation();
+        goToNewTrend();
+      }, true);
+      const addTrendBtn = document.getElementById('campaignAddTrendBtn');
+      if (addTrendBtn) addTrendBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); goToNewTrend(); };
     }
   });
 }
@@ -2919,20 +3328,20 @@ function openEditAvatarModal(type, id, imageUrl, onSuccess) {
       initFromImage();
     }).catch(() => {
       URL.revokeObjectURL(url);
-      alert('Could not load image');
+      showAlert('Could not load image');
     });
     fileInput.value = '';
   };
 
   saveBtn.onclick = () => {
     getCroppedBlob().then((blob) => {
-      if (!blob) { alert('Could not process image'); return; }
+      if (!blob) { showAlert('Could not process image'); return; }
       const file = new File([blob], 'avatar.jpg', { type: 'image/jpeg' });
       const upload = type === 'project' ? apiUploadProjectAvatar(String(id), file) : apiUploadCampaignAvatar(String(id), file);
       upload.then(() => {
         modal.hidden = true;
         if (onSuccess) onSuccess();
-      }).catch((err) => alert(err.message || 'Upload failed'));
+      }).catch((err) => showAlert(err.message || 'Upload failed'));
     });
   };
 
@@ -2943,7 +3352,7 @@ function openEditAvatarModal(type, id, imageUrl, onSuccess) {
     initFromImage();
     modal.hidden = false;
   }).catch(() => {
-    alert('Could not load image');
+    showAlert('Could not load image');
   });
 }
 
@@ -2953,7 +3362,7 @@ function openJoinCampaignModal(projectId, joinableCampaigns, onSuccess) {
   const cancelBtn = document.getElementById('joinCampaignCancel');
   if (!modal || !list) return;
   if (!joinableCampaigns.length) {
-    alert('No campaigns available. All campaigns already include this page.');
+    showAlert('No campaigns available. All campaigns already include this page.');
     return;
   }
   list.innerHTML = joinableCampaigns.map((c) => `
@@ -2969,7 +3378,7 @@ function openJoinCampaignModal(projectId, joinableCampaigns, onSuccess) {
       if (!campaign) return;
       const pageIds = (campaign.pageIds && campaign.pageIds.length) ? campaign.pageIds : (campaign.projectId != null ? [campaign.projectId] : []);
       const newPageIds = [...pageIds, projectId];
-      apiUpdateCampaignPages(campaignId, newPageIds).then(() => { close(); onSuccess(); }).catch((err) => alert(err.message || 'Failed'));
+      apiUpdateCampaignPages(campaignId, newPageIds).then(() => { close(); onSuccess(); }).catch((err) => showAlert(err.message || 'Failed'));
     };
   });
   modal.onclick = (e) => { if (e.target.id === 'joinCampaignModal') close(); };
@@ -2995,7 +3404,7 @@ function openAddPageModal(campaignId, currentPageIds, availablePages, onSuccess)
   list.querySelectorAll('button').forEach((btn) => {
     btn.onclick = () => {
       const newPageIds = [...currentPageIds, parseInt(btn.dataset.pageId, 10)];
-      apiUpdateCampaignPages(campaignId, newPageIds).then(() => { close(); onSuccess(); }).catch((err) => alert(err.message || 'Failed'));
+      apiUpdateCampaignPages(campaignId, newPageIds).then(() => { close(); onSuccess(); }).catch((err) => showAlert(err.message || 'Failed'));
     };
   });
   modal.onclick = (e) => { if (e.target.id === 'addPageToCampaignModal') close(); };
@@ -3062,8 +3471,10 @@ function renderLogins() {
         btn.onclick = () => {
           const tr = btn.closest('tr');
           const id = parseInt(tr.dataset.id, 10);
-          if (!confirm('Delete this login?')) return;
-          apiDeleteLogin(id).then(() => refresh()).catch((e) => alert(e.message || 'Failed to delete'));
+          showConfirm('Delete this login?').then((ok) => {
+            if (!ok) return;
+            apiDeleteLogin(id).then(() => refresh()).catch((e) => showAlert(e.message || 'Failed to delete'));
+          });
         };
       });
       tbody.querySelectorAll('.logins-save-row').forEach((btn) => {
@@ -3073,9 +3484,9 @@ function renderLogins() {
           const get = (f) => (tr.querySelector(`[data-field="${f}"]`) || {}).value;
           const payload = { email: get('email'), username: get('username'), password: get('password'), platform: get('platform') };
           if (id === 'new') {
-            apiCreateLogin(payload).then(() => refresh()).catch((e) => alert(e.message || 'Failed to save'));
+            apiCreateLogin(payload).then(() => refresh()).catch((e) => showAlert(e.message || 'Failed to save'));
           } else {
-            apiUpdateLogin(parseInt(id, 10), payload).then(() => refresh()).catch((e) => alert(e.message || 'Failed to save'));
+            apiUpdateLogin(parseInt(id, 10), payload).then(() => refresh()).catch((e) => showAlert(e.message || 'Failed to save'));
           }
         };
       });
@@ -3086,7 +3497,7 @@ function renderLogins() {
         wrap.onclick = () => input.click();
         input.onchange = (e) => {
           const file = e.target.files && e.target.files[0];
-          if (file) apiUploadLoginAvatar(lid, file).then(() => refresh()).catch((err) => alert(err.message || 'Upload failed'));
+          if (file) apiUploadLoginAvatar(lid, file).then(() => refresh()).catch((err) => showAlert(err.message || 'Upload failed'));
           input.value = '';
         };
       });
@@ -3101,10 +3512,418 @@ function renderLogins() {
       const get = (f) => (newRow.querySelector(`[data-field="${f}"]`) || {}).value;
       apiCreateLogin({ email: get('email'), username: get('username'), password: get('password'), platform: get('platform') })
         .then(() => refresh())
-        .catch((e) => alert(e.message || 'Failed to save'));
+        .catch((e) => showAlert(e.message || 'Failed to save'));
     };
   };
   refresh();
+}
+
+function openNewTrendModal(projects, onSuccess, options) {
+  const opts = options || {};
+  const campaignId = opts.campaignId != null ? String(opts.campaignId) : null;
+  const defaultPageIds = Array.isArray(opts.defaultPageIds) ? opts.defaultPageIds : [];
+  const modal = document.getElementById('newTrendModal');
+  const nameInput = document.getElementById('newTrendName');
+  const pagesDiv = document.getElementById('newTrendPages');
+  if (!modal || !nameInput || !pagesDiv) {
+    showAlert('Trend modal could not be opened. Please refresh the page.');
+    return;
+  }
+  const projectList = Array.isArray(projects) ? projects : [];
+  if (!projectList.length) {
+    showAlert('No pages available. Add pages (influencers) first.');
+    return;
+  }
+  nameInput.value = 'New trend';
+  pagesDiv.innerHTML = projectList.map((p) => {
+    const checked = defaultPageIds.includes(p.id) ? ' checked' : '';
+    return `<label class="checkbox-field">
+      <input type="checkbox" class="new-trend-page-cb" value="${p.id}"${checked} />
+      <span>${escapeHtml(p.name)}</span>
+    </label>`;
+  }).join('');
+  modal.hidden = false;
+  const close = () => { modal.hidden = true; };
+  document.getElementById('newTrendCancel').onclick = close;
+  modal.onclick = (e) => { if (e.target.id === 'newTrendModal') close(); };
+  modal.querySelector('.modal').onclick = (e) => e.stopPropagation();
+  document.getElementById('newTrendForm').onsubmit = (e) => {
+    e.preventDefault();
+    const name = (nameInput.value || '').trim() || 'New trend';
+    const ids = Array.from(modal.querySelectorAll('.new-trend-page-cb:checked')).map((cb) => parseInt(cb.value, 10)).filter((id) => !isNaN(id));
+    if (!ids.length) { showAlert('Select at least one page'); return; }
+    apiCreateTrend(name, ids, campaignId).then((t) => {
+      close();
+      location.hash = `#/trends/${t.id}`;
+      render();
+      if (onSuccess) onSuccess();
+    }).catch((err) => showAlert(err.message || 'Failed to create trend'));
+  };
+}
+
+function renderTrends() {
+  setBreadcrumb({ view: 'trends' });
+  Promise.all([apiProjects(), apiTrends()]).then(([projects, trends]) => {
+    const main = document.getElementById('main');
+    main.innerHTML = `
+      <section class="card">
+        <h1>Trends</h1>
+        <p class="hint">Create trends with shared on-screen text at the top. Each page has its own photos, schedule, and run.</p>
+        <div class="campaigns-list" id="trendsList"></div>
+        <div class="actions" style="margin-top:1rem;">
+          <button type="button" class="btn btn-primary" id="newTrendBtn">Start a new trend</button>
+        </div>
+      </section>
+    `;
+    const list = document.getElementById('trendsList');
+    if (!trends.length) {
+      list.innerHTML = '<p class="empty">No trends yet. Start a new trend and select which pages to include.</p>';
+    } else {
+      const sorted = [...trends].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+      list.innerHTML = sorted.map((t) => `
+        <div class="campaigns-list-item">
+          <a href="#/trends/${t.id}" class="campaign-card-link">
+            <div class="list-card">
+              <div class="list-card-main">
+                <span class="list-card-title">${escapeHtml(t.name)}</span>
+                <span class="list-card-meta">${(t.pageIds && t.pageIds.length) ? t.pageIds.length + ' page(s)' : 'No pages'}</span>
+              </div>
+            </div>
+          </a>
+          <button type="button" class="btn btn-ghost btn-sm list-card-action" data-action="delete-trend" data-tid="${t.id}" data-tname="${escapeHtml(t.name)}" aria-label="Delete">Delete</button>
+        </div>
+      `).join('');
+    }
+    document.getElementById('newTrendBtn').onclick = () => {
+      location.hash = '#/trends/new';
+    };
+    list.querySelectorAll('[data-action="delete-trend"]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const name = btn.dataset.tname || 'this trend';
+        showConfirm(`Delete trend "${name}"? This cannot be undone.`).then((ok) => {
+          if (!ok) return;
+          apiDeleteTrend(btn.dataset.tid).then(() => render()).catch((err) => showAlert(err.message || 'Failed to delete'));
+        });
+      };
+    });
+  }).catch(() => {
+    document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap"><a href="#/trends" class="nav-link">← Back to trends</a></p><p>Could not load trends.</p></section>';
+  });
+}
+
+function renderTrendNew(campaignIdFromRoute) {
+  setBreadcrumb({ view: 'trendNew' });
+  let campaignId = campaignIdFromRoute != null && campaignIdFromRoute !== '' ? String(campaignIdFromRoute) : null;
+  let defaultPageIds = [];
+  try {
+    const stored = sessionStorage.getItem('newTrendContext');
+    if (stored) {
+      const ctx = JSON.parse(stored);
+      if (ctx.campaignId != null) campaignId = String(ctx.campaignId);
+      if (Array.isArray(ctx.defaultPageIds)) defaultPageIds = ctx.defaultPageIds;
+      sessionStorage.removeItem('newTrendContext');
+    }
+  } catch (_) {}
+  apiProjects().then((projects) => {
+    const projectList = Array.isArray(projects) ? projects : [];
+    const main = document.getElementById('main');
+    const backLink = campaignId
+      ? `<p class="back-link-wrap"><a href="#/campaigns/${escapeHtml(campaignId)}" class="nav-link">← Back to campaign</a></p>`
+      : '<p class="back-link-wrap"><a href="#/trends" class="nav-link">← Back to trends</a></p>';
+    main.innerHTML = `
+      <section class="card">
+        ${backLink}
+        <h1>New trend</h1>
+        <p class="hint">Create a trend and select which pages (AI influencers) it applies to. After creating, you can add on-screen text options and styles for those pages.</p>
+        <form id="trendNewForm" class="settings-form" style="margin-top:1rem;">
+          <label class="field">
+            <span>Name</span>
+            <input type="text" id="trendNewName" placeholder="New trend" value="New trend" />
+          </label>
+          <div class="field">
+            <span>Pages</span>
+            <div id="trendNewPages" class="new-campaign-pages" style="display:flex;flex-direction:column;gap:8px;margin-top:8px;"></div>
+          </div>
+          <div class="actions" style="margin-top:1rem;">
+            <button type="submit" class="btn btn-primary">Create trend</button>
+            <a href="#/trends" class="btn btn-ghost">Cancel</a>
+          </div>
+        </form>
+      </section>
+    `;
+    const nameInput = document.getElementById('trendNewName');
+    const pagesDiv = document.getElementById('trendNewPages');
+    if (!projectList.length) {
+      pagesDiv.innerHTML = '<p class="hint">No pages available. Add pages (influencers) in a campaign first.</p>';
+    } else {
+      pagesDiv.innerHTML = projectList.map((p) => {
+        const checked = defaultPageIds.includes(p.id) ? ' checked' : '';
+        return `<label class="checkbox-field" style="display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" class="trend-new-page-cb" value="${p.id}"${checked} />
+          <span>${escapeHtml(p.name)}</span>
+        </label>`;
+      }).join('');
+    }
+    document.getElementById('trendNewForm').onsubmit = (e) => {
+      e.preventDefault();
+      const name = (nameInput && nameInput.value || '').trim() || 'New trend';
+      const ids = Array.from(main.querySelectorAll('.trend-new-page-cb:checked')).map((cb) => parseInt(cb.value, 10)).filter((id) => !isNaN(id));
+      if (!ids.length) { showAlert('Select at least one page'); return; }
+      apiCreateTrend(name, ids, campaignId).then((t) => {
+        location.hash = `#/trends/${t.id}`;
+        render();
+      }).catch((err) => showAlert(err.message || 'Failed to create trend'));
+    };
+  }).catch(() => {
+    document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap"><a href="#/trends" class="nav-link">← Back to trends</a></p><p>Could not load pages.</p></section>';
+  });
+}
+
+function renderTrendDetail(trendId) {
+  const tid = trendId;
+  Promise.all([apiProjects(), apiTrend(tid), apiTrendLatest(tid)]).then(([projects, trend, latest]) => {
+    if (!trend) {
+      document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap back-link-wrap-centered"><a href="#/trends" class="nav-link">← Back to trends</a></p><p>Trend not found.</p></section>';
+      return;
+    }
+    setBreadcrumb({ view: 'trendDetail', trendId: tid });
+    const pageIds = trend.pageIds && trend.pageIds.length ? trend.pageIds : [];
+    const pages = pageIds.map((id) => projects.find((p) => p.id === id)).filter(Boolean);
+    const textOptions = Array.isArray(trend.textOptions) && trend.textOptions.length ? trend.textOptions : ['Follow for more'];
+    const textStyle = trend.textStyle || { x: 0, y: 0, fontSize: 48, font: 'Arial, sans-serif', color: 'white', strokeWidth: 2 };
+    const latestUrls = (latest && latest.webContentUrls) ? latest.webContentUrls : [];
+    const campaignId = trend.campaignId != null ? String(trend.campaignId) : null;
+    const backLink = campaignId
+      ? `<p class="back-link-wrap back-link-wrap-centered"><a href="#/campaigns/${escapeHtml(campaignId)}" class="nav-link">← Back to campaign</a></p>`
+      : '<p class="back-link-wrap back-link-wrap-centered"><a href="#/trends" class="nav-link">← Back to trends</a></p>';
+
+    const main = document.getElementById('main');
+    main.innerHTML = `
+      <section class="card">
+        ${backLink}
+        <h1 id="trendDetailName" title="Double-click to rename">${escapeHtml(trend.name)}</h1>
+
+        <section class="card" style="margin-top:1rem;">
+          <h2>On-screen text &amp; text styling</h2>
+          <p class="hint">Shared across all pages in this trend. Position and style of the overlay text on images.</p>
+          <div class="text-style-folder-card text-style-folder-card-live" data-folder="trend-shared">
+            <div class="text-style-settings-panel">
+              <div class="text-style-grid">
+                <label class="field"><span>X (%)</span><input type="number" id="trendTextX" value="${textStyle.x ?? 0}" step="1" /></label>
+                <label class="field"><span>Y (%)</span><input type="number" id="trendTextY" value="${textStyle.y ?? 0}" step="1" /></label>
+                <label class="field"><span>Size (px)</span><input type="number" id="trendTextSize" value="${(textStyle.fontSize >= 12 && textStyle.fontSize <= 200) ? textStyle.fontSize : 48}" min="12" max="200" step="1" /></label>
+                <label class="field"><span>Font</span><select id="trendTextFont" class="field-select">${AVAILABLE_FONTS.map((f) => `<option value="${escapeHtml(f)}" ${(textStyle.font || 'Arial, sans-serif') === f ? 'selected' : ''}>${escapeHtml(f)}</option>`).join('')}</select></label>
+                <label class="field"><span>Color</span><input type="text" id="trendTextColor" value="${escapeHtml(textStyle.color || 'white')}" /></label>
+                <label class="field"><span>Stroke</span><input type="number" id="trendTextStroke" value="${textStyle.strokeWidth ?? 2}" min="0" max="10" step="0.5" /></label>
+              </div>
+            </div>
+            <div class="trend-text-options-wrap">
+              <h4 class="field-label">Text options (one per line, used randomly)</h4>
+              <textarea id="trendTextOptions" rows="4" class="field-input" placeholder="Follow for more\nLike &amp; Save">${escapeHtml((textOptions || []).join('\n'))}</textarea>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+            <button type="button" class="btn btn-secondary" id="trendSaveTextStyle">Save text styles</button>
+            <button type="button" class="btn btn-primary" id="trendRunNow">Run now</button>
+            <button type="button" class="btn btn-ghost" id="trendClearUrls">Clear URLs</button>
+          </div>
+        </section>
+
+        <section class="card" style="margin-top:1rem;">
+          <h2>Pages</h2>
+          <p class="hint">Add photos, set schedule, and run for each page.</p>
+          <div class="trend-pages-grid" id="trendPagesGrid"></div>
+        </section>
+      </section>
+    `;
+
+    document.getElementById('trendDetailName').ondblclick = () => {
+      showPrompt('Trend name:', trend.name).then((name) => {
+        if (name != null && name.trim()) apiUpdateTrend(tid, { name: name.trim() }).then((t) => { trend = t; document.getElementById('trendDetailName').textContent = t.name; });
+      });
+    };
+
+    document.getElementById('trendSaveTextStyle').onclick = () => {
+      const textOptionsArr = (document.getElementById('trendTextOptions').value || '').trim().split(/\n/).map((s) => s.trim()).filter(Boolean);
+      const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat(document.getElementById('trendTextSize').value) || 48)));
+      const textStyleObj = {
+        x: parseFloat(document.getElementById('trendTextX').value) ?? 0,
+        y: parseFloat(document.getElementById('trendTextY').value) ?? 0,
+        fontSize: sizePx,
+        font: (document.getElementById('trendTextFont').value || 'Arial, sans-serif').trim(),
+        color: (document.getElementById('trendTextColor').value || 'white').trim(),
+        strokeWidth: parseFloat(document.getElementById('trendTextStroke').value) ?? 2,
+      };
+      apiUpdateTrend(tid, { textOptions: textOptionsArr.length ? textOptionsArr : ['Follow for more'], textStyle: textStyleObj })
+        .then((t) => { trend = t; showAlert('Text styles saved.'); })
+        .catch((err) => showAlert(err.message || 'Failed to save'));
+    };
+
+    const grid = document.getElementById('trendPagesGrid');
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const folderCount = Math.max(1, parseInt(trend.folderCount, 10) || 3);
+    pages.forEach((p, idx) => {
+      const pageIndex = idx + 1;
+      const schedule = (trend.pageSchedules && trend.pageSchedules[p.id]) || {};
+      const times = schedule.scheduleTimes || ['10:00', '13:00', '16:00'];
+      const daysOfWeek = schedule.scheduleDaysOfWeek ?? [0, 1, 2, 3, 4, 5, 6];
+      const scheduleStart = schedule.scheduleStartDate || '';
+      const scheduleEnd = schedule.scheduleEndDate || '';
+      const folderCardsHtml = Array.from({ length: folderCount }, (_, i) => {
+        const f = i + 1;
+        return `
+          <div class="folder trend-folder" data-folder="${f}">
+            <div class="dropzone trend-dropzone" data-trend-id="${tid}" data-page-index="${pageIndex}" data-folder-num="${f}">
+              <span class="dropzone-label">Folder ${f}</span>
+              <span class="trend-folder-count" data-page-index="${pageIndex}" data-folder-num="${f}">0 photos</span>
+              <button type="button" class="btn btn-secondary btn-sm dropzone-add">Add photos</button>
+              <button type="button" class="btn btn-ghost btn-sm trend-folder-preview" data-page-index="${pageIndex}" data-folder-num="${f}">Preview</button>
+              <input type="file" accept="image/*" multiple hidden data-trend-id="${tid}" data-page-index="${pageIndex}" data-folder-num="${f}" />
+            </div>
+          </div>
+        `;
+      }).join('');
+      const card = document.createElement('div');
+      card.className = 'card trend-page-card';
+      card.innerHTML = `
+        <h3>${escapeHtml(p.name)}</h3>
+        <div class="trend-page-photos">
+          <p class="hint">Photos for this page. One image per folder is used per run. Add photos and use Preview to see the result.</p>
+          <div class="trend-folders folders" data-page-index="${pageIndex}">${folderCardsHtml}</div>
+        </div>
+        <div class="trend-page-schedule schedule-content">
+          <h4>Schedule</h4>
+          <label class="checkbox-field"><input type="checkbox" class="trend-schedule-enabled" data-page-id="${p.id}" ${schedule.scheduleEnabled !== false ? 'checked' : ''} /><span>Run on schedule</span></label>
+          <div class="schedule-date-range" style="margin-top:8px;">
+            <label class="field"><span>Start date</span><input type="date" class="trend-schedule-start" data-page-id="${p.id}" value="${scheduleStart}" /></label>
+            <label class="field"><span>End date</span><input type="date" class="trend-schedule-end" data-page-id="${p.id}" value="${scheduleEnd}" /></label>
+          </div>
+          <div class="schedule-days" style="margin-top:8px;">
+            <span class="field-label">Days of week</span>
+            <div class="schedule-days-checkboxes">${[0, 1, 2, 3, 4, 5, 6].map((d) => `<label class="checkbox-field checkbox-inline"><input type="checkbox" class="trend-schedule-day" data-page-id="${p.id}" data-day="${d}" ${daysOfWeek.includes(d) ? 'checked' : ''} /><span>${dayNames[d]}</span></label>`).join('')}</div>
+          </div>
+          <div class="schedule-times-wrap" style="margin-top:8px;">
+            <div class="schedule-times-header"><span class="field-label">Post times (${times.length} per day)</span><button type="button" class="btn btn-ghost btn-sm trend-add-time" data-page-id="${p.id}">+ Add time</button><button type="button" class="btn btn-ghost btn-sm trend-remove-time" data-page-id="${p.id}">− Remove</button></div>
+            <div class="schedule-times trend-schedule-times" data-page-id="${p.id}">${times.map((t, i) => `<label class="time-row"><input type="time" class="trend-time-input" data-page-id="${p.id}" data-index="${i}" value="${t || '10:00'}" /></label>`).join('')}</div>
+          </div>
+          <button type="button" class="btn btn-secondary btn-sm trend-save-schedule-btn" data-page-id="${p.id}" style="margin-top:8px;">Save schedule</button>
+        </div>
+        <div class="trend-page-run">
+          <h4>Generated URLs</h4>
+          <p class="hint">Use &quot;Run now&quot; at the top to generate one image per folder per page with the shared text.</p>
+          <div class="trend-urls-list" data-page-id="${p.id}"></div>
+        </div>
+      `;
+      grid.appendChild(card);
+
+      function refreshPageFolders() {
+        apiTrendPageFolders(tid, pageIndex).then((data) => {
+          const fc = data.folderCount || folderCount;
+          const folders = data.folders || {};
+          card.querySelectorAll('.trend-folder').forEach((el, i) => {
+            const f = i + 1;
+            const count = (folders[`folder${f}`] || []).length;
+            const countEl = el.querySelector('.trend-folder-count');
+            if (countEl) countEl.textContent = `${count} photo${count !== 1 ? 's' : ''}`;
+          });
+        }).catch(() => {});
+      }
+      refreshPageFolders();
+
+      card.querySelectorAll('.trend-dropzone').forEach((dz) => {
+        const folderNum = parseInt(dz.dataset.folderNum, 10);
+        const addBtn = dz.querySelector('.dropzone-add');
+        const input = dz.querySelector('input[type="file"]');
+        const previewBtn = dz.querySelector('.trend-folder-preview');
+        if (addBtn) addBtn.onclick = (e) => { e.stopPropagation(); input.click(); };
+        dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('dragover'); };
+        dz.ondragleave = () => dz.classList.remove('dragover');
+        dz.ondrop = (e) => {
+          e.preventDefault();
+          dz.classList.remove('dragover');
+          const files = e.dataTransfer.files;
+          if (files && files.length) apiTrendPageFolderUpload(tid, pageIndex, folderNum, files).then(() => refreshPageFolders()).catch((err) => showAlert(err.message || 'Upload failed'));
+        };
+        dz.onclick = (e) => { if (e.target !== addBtn && e.target !== previewBtn) input.click(); };
+        input.onchange = (e) => {
+          const files = e.target.files;
+          if (files && files.length) apiTrendPageFolderUpload(tid, pageIndex, folderNum, files).then(() => { refreshPageFolders(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed'));
+        };
+        if (previewBtn) previewBtn.onclick = (e) => {
+          e.stopPropagation();
+          const textOptionsArr = (document.getElementById('trendTextOptions') && document.getElementById('trendTextOptions').value || '').trim().split(/\n/).map((s) => s.trim()).filter(Boolean);
+          const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat((document.getElementById('trendTextSize') || {}).value) || 48)));
+          const textStyleObj = {
+            x: parseFloat((document.getElementById('trendTextX') || {}).value) ?? 0,
+            y: parseFloat((document.getElementById('trendTextY') || {}).value) ?? 0,
+            fontSize: sizePx,
+            font: ((document.getElementById('trendTextFont') || {}).value || 'Arial, sans-serif').trim(),
+            color: ((document.getElementById('trendTextColor') || {}).value || 'white').trim(),
+            strokeWidth: parseFloat((document.getElementById('trendTextStroke') || {}).value) ?? 2,
+          };
+          apiTrendPreview(tid, pageIndex, folderNum, textStyleObj, textOptionsArr.length ? textOptionsArr : null)
+            .then((r) => { if (r.url) window.open(r.url, '_blank'); else showAlert('Preview failed'); })
+            .catch((err) => showAlert(err.message || 'Preview failed'));
+        };
+      });
+
+      const timesWrap = card.querySelector('.trend-schedule-times');
+      card.querySelector('.trend-add-time').onclick = () => {
+        const inputs = timesWrap.querySelectorAll('.trend-time-input');
+        const lastVal = inputs.length ? inputs[inputs.length - 1].value : '10:00';
+        const [h, m] = lastVal.split(':').map(Number);
+        const nextVal = `${String((h + 2) % 24).padStart(2, '0')}:${String(m || 0).padStart(2, '0')}`;
+        const label = document.createElement('label');
+        label.className = 'time-row';
+        label.innerHTML = `<input type="time" class="trend-time-input" data-page-id="${p.id}" data-index="${inputs.length}" value="${nextVal}" />`;
+        timesWrap.appendChild(label);
+      };
+      card.querySelector('.trend-remove-time').onclick = () => {
+        const rows = timesWrap.querySelectorAll('.time-row');
+        if (rows.length > 1) rows[rows.length - 1].remove();
+      };
+
+      card.querySelector('.trend-save-schedule-btn').onclick = () => {
+        const enabled = !!card.querySelector('.trend-schedule-enabled').checked;
+        const scheduleStartVal = (card.querySelector('.trend-schedule-start') || {}).value || null;
+        const scheduleEndVal = (card.querySelector('.trend-schedule-end') || {}).value || null;
+        const daysChecked = Array.from(card.querySelectorAll('.trend-schedule-day:checked')).map((cb) => parseInt(cb.dataset.day, 10));
+        const scheduleTimes = Array.from(card.querySelectorAll('.trend-time-input')).map((inp) => inp.value || '10:00');
+        const newSchedules = { ...(trend.pageSchedules || {}) };
+        newSchedules[p.id] = { scheduleEnabled: enabled, scheduleStartDate: scheduleStartVal, scheduleEndDate: scheduleEndVal, scheduleDaysOfWeek: daysChecked, scheduleTimes };
+        apiUpdateTrend(tid, { pageSchedules: newSchedules }).then((t) => { trend = t; showAlert('Schedule saved.'); }).catch((err) => showAlert(err.message || 'Failed to save'));
+      };
+
+      const urlListEl = card.querySelector('.trend-urls-list');
+      const urlsForPage = latestUrls.filter((u) => u.pageId === p.id).map((u) => u.url);
+      urlListEl.innerHTML = urlsForPage.length ? urlsForPage.map((u) => `<p class="url-item"><a href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a></p>`).join('') : '<p class="hint">Run once to see URLs.</p>';
+    });
+
+    document.getElementById('trendRunNow').onclick = () => {
+      const textOptionsArr = (document.getElementById('trendTextOptions').value || '').trim().split(/\n/).map((s) => s.trim()).filter(Boolean);
+      const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat(document.getElementById('trendTextSize').value) || 48)));
+      const textStyleObj = {
+        x: parseFloat(document.getElementById('trendTextX').value) ?? 0,
+        y: parseFloat(document.getElementById('trendTextY').value) ?? 0,
+        fontSize: sizePx,
+        font: (document.getElementById('trendTextFont').value || 'Arial, sans-serif').trim(),
+        color: (document.getElementById('trendTextColor').value || 'white').trim(),
+        strokeWidth: parseFloat(document.getElementById('trendTextStroke').value) ?? 2,
+      };
+      apiTrendRun(tid, textStyleObj, textOptionsArr.length ? textOptionsArr : null).then(() => renderTrendDetail(tid)).catch((err) => showAlert(err.message || 'Run failed'));
+    };
+
+    document.getElementById('trendClearUrls').onclick = () => {
+      showConfirm('Clear all generated URLs for this trend?').then((ok) => {
+        if (!ok) return;
+        apiTrendClearLatest(tid).then(() => renderTrendDetail(tid));
+      });
+    };
+  }).catch(() => {
+    document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap back-link-wrap-centered"><a href="#/trends" class="nav-link">← Back to trends</a></p><p>Could not load trend.</p></section>';
+  });
 }
 
 function renderCalendar() {
@@ -3112,14 +3931,16 @@ function renderCalendar() {
   apiWithAuth(`${API}/api/calendar`).then((r) => r.json()).then((data) => {
     const items = data.items || [];
     const main = document.getElementById('main');
+    const total = items.length;
     if (!items.length) {
-      main.innerHTML = '<section class="card"><h1>Calendar</h1><p class="hint">Upcoming scheduled posts (deployed campaigns only).</p><p class="empty">No scheduled runs. Deploy campaigns and set times to see them here.</p></section>';
+      main.innerHTML = '<section class="card"><h1>Calendar</h1><p class="calendar-total">Total scheduled: <strong>0</strong></p><p class="hint">Upcoming scheduled posts (deployed campaigns only).</p><p class="empty">No scheduled runs. Deploy campaigns and set times to see them here.</p></section>';
       return;
     }
     main.innerHTML = `
       <section class="card">
         <h1>Calendar</h1>
-        <p class="hint">Upcoming scheduled posts across all pages (deployed campaigns only).</p>
+        <p class="calendar-total">Total scheduled: <strong>${total}</strong></p>
+        <p class="hint">Upcoming scheduled posts across all pages (deployed campaigns only). Each campaign is capped by its smallest photo folder.</p>
         <div class="calendar-header">
           <span class="calendar-date">Date</span>
           <span class="calendar-time">Time</span>
@@ -3151,6 +3972,9 @@ function render() {
   else if (route.view === 'logins') renderLogins();
   else if (route.view === 'campaigns') renderCampaigns();
   else if (route.view === 'campaignDetail') renderCampaignDetail(route.campaignId);
+  else if (route.view === 'trends') renderTrends();
+  else if (route.view === 'trendNew') renderTrendNew(route.campaignId);
+  else if (route.view === 'trendDetail') renderTrendDetail(route.trendId);
   else if (route.view === 'project') renderProject(route.projectId);
   else if (route.view === 'projectUsed') renderProjectUsed(route.projectId);
   else if (route.view === 'campaign') renderCampaign(route.projectId, route.campaignId, route.postTypeId);
@@ -3359,6 +4183,20 @@ window.addEventListener('hashchange', () => {
   }
   render();
 });
+
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.campaign-page-remove') || e.target.closest('.campaign-page-ugc-select')) return;
+  const link = e.target.closest('.campaign-pages-grid a.campaign-page-card');
+  if (!link) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const href = link.getAttribute('href') || link.href || '';
+  const hash = href.indexOf('#') >= 0 ? href.slice(href.indexOf('#')) : (href ? '#' + href : '');
+  if (hash) {
+    window.location.hash = hash;
+    render();
+  }
+}, true);
 
 function bindAuthTabClicks() {
   const authView = document.getElementById('authView');

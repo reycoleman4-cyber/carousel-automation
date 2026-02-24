@@ -13,10 +13,11 @@ const storage = require('./storage');
 
 const PORT = process.env.PORT || 3721;
 const ROOT = path.resolve(__dirname);
-// Railway Volumes: set GENERATED_DIR and UPLOADS_DIR to your volume paths (e.g. /data/generated, /data/uploads)
-const GENERATED = process.env.GENERATED_DIR ? path.resolve(process.env.GENERATED_DIR) : path.join(ROOT, 'generated');
-const UPLOADS = process.env.UPLOADS_DIR ? path.resolve(process.env.UPLOADS_DIR) : path.join(ROOT, 'uploads');
-const DATA = path.join(ROOT, 'data');
+// Railway Volumes: set DATA_DIR, GENERATED_DIR, UPLOADS_DIR to your volume paths so all data persists across redeploys.
+// Example: mount volume at /data, then DATA_DIR=/data, GENERATED_DIR=/data/generated, UPLOADS_DIR=/data/uploads
+const DATA = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(ROOT, 'data');
+const GENERATED = process.env.GENERATED_DIR ? path.resolve(process.env.GENERATED_DIR) : path.join(DATA, 'generated');
+const UPLOADS = process.env.UPLOADS_DIR ? path.resolve(process.env.UPLOADS_DIR) : path.join(DATA, 'uploads');
 const PROJECTS_PATH = path.join(DATA, 'projects.json');
 const CAMPAIGNS_PATH = path.join(DATA, 'campaigns.json');
 const PROJECTS_DIR = path.join(DATA, 'projects');
@@ -24,9 +25,11 @@ const CAMPAIGNS_DIR = path.join(DATA, 'campaigns');
 const CONFIG_PATH = path.join(DATA, 'config.json');
 const LOGINS_PATH = path.join(DATA, 'logins.json');
 const RUNS_DIR = path.join(DATA, 'runs');
+const TEXT_USAGE_DIR = path.join(DATA, 'text-usage');
 const AVATARS_DIR = path.join(DATA, 'avatars');
 const CAMPAIGN_AVATARS_DIR = path.join(DATA, 'campaign-avatars');
 const LOGIN_AVATARS_DIR = path.join(DATA, 'login-avatars');
+const TRENDS_DIR = path.join(DATA, 'trends');
 
 const app = express();
 app.use(cors());
@@ -70,11 +73,13 @@ const DEFAULT_TEXT_OPTIONS = [
 function ensureDataDir() {
   if (!fsSync.existsSync(DATA)) fsSync.mkdirSync(DATA, { recursive: true });
   if (!fsSync.existsSync(RUNS_DIR)) fsSync.mkdirSync(RUNS_DIR, { recursive: true });
+  if (!fsSync.existsSync(TEXT_USAGE_DIR)) fsSync.mkdirSync(TEXT_USAGE_DIR, { recursive: true });
   if (!fsSync.existsSync(AVATARS_DIR)) fsSync.mkdirSync(AVATARS_DIR, { recursive: true });
   if (!fsSync.existsSync(CAMPAIGN_AVATARS_DIR)) fsSync.mkdirSync(CAMPAIGN_AVATARS_DIR, { recursive: true });
   if (!fsSync.existsSync(LOGIN_AVATARS_DIR)) fsSync.mkdirSync(LOGIN_AVATARS_DIR, { recursive: true });
   if (!fsSync.existsSync(PROJECTS_DIR)) fsSync.mkdirSync(PROJECTS_DIR, { recursive: true });
   if (!fsSync.existsSync(CAMPAIGNS_DIR)) fsSync.mkdirSync(CAMPAIGNS_DIR, { recursive: true });
+  if (!fsSync.existsSync(TRENDS_DIR)) fsSync.mkdirSync(TRENDS_DIR, { recursive: true });
 }
 
 /** Returns req.user.id or sends 401 and null. Use for routes that must be per-user. */
@@ -220,6 +225,92 @@ function deleteCampaign(campaignId, userId) {
   const meta = getCampaignsMeta(userId);
   const items = (meta.items || []).filter((c) => c.id !== campaignId);
   writeJson(getCampaignsPath(userId), { ...meta, items });
+}
+
+// --- Trends (shared text at top, one folder of photos per page) ---
+function getTrendsPath(userId) {
+  if (!userId) return null;
+  return path.join(TRENDS_DIR, `${String(userId).replace(/[/\\]/g, '_')}.json`);
+}
+
+function getTrendsMeta(userId) {
+  if (!userId) return { nextId: 1, items: [] };
+  ensureDataDir();
+  const filePath = getTrendsPath(userId);
+  const data = readJson(filePath, { nextId: 1, items: [] });
+  return { nextId: data.nextId || 1, items: data.items || [] };
+}
+
+function getAllTrends(userId) {
+  if (!userId) return [];
+  const data = getTrendsMeta(userId);
+  return data.items || [];
+}
+
+function getTrendById(trendId, userId) {
+  const all = getAllTrends(userId);
+  const id = typeof trendId === 'string' ? parseInt(trendId, 10) : trendId;
+  return all.find((t) => t.id === id);
+}
+
+function saveTrend(trend, userId) {
+  if (!userId) return;
+  ensureDataDir();
+  const meta = getTrendsMeta(userId);
+  const items = [...(meta.items || [])];
+  const idx = items.findIndex((t) => t.id === trend.id);
+  if (idx >= 0) items[idx] = trend;
+  else items.push(trend);
+  const nextId = trend.id >= meta.nextId ? trend.id + 1 : meta.nextId;
+  writeJson(getTrendsPath(userId), { nextId, items });
+}
+
+function deleteTrend(trendId, userId) {
+  if (!userId) return;
+  const meta = getTrendsMeta(userId);
+  const items = (meta.items || []).filter((t) => t.id !== trendId);
+  writeJson(getTrendsPath(userId), { ...meta, items });
+}
+
+function trendDirs(userId, trendId, pageCount) {
+  const uid = String(userId).replace(/[/\\]/g, '_');
+  const base = path.join(TRENDS_DIR, uid, String(trendId));
+  const dirs = [];
+  for (let i = 1; i <= pageCount; i++) dirs.push(path.join(base, String(i)));
+  return dirs;
+}
+
+/** Per-page folder dirs: when folderCount is 1 returns [ base/pageIndex ]; when > 1 returns [ base/page_N/1, base/page_N/2, ... ]. */
+function trendPageFolderDirs(userId, trendId, pageIndex, folderCount) {
+  const uid = String(userId).replace(/[/\\]/g, '_');
+  const base = path.join(TRENDS_DIR, uid, String(trendId));
+  const n = Math.max(1, parseInt(folderCount, 10) || 1);
+  const dirs = [];
+  if (n === 1) {
+    dirs.push(path.join(base, String(pageIndex)));
+  } else {
+    for (let f = 1; f <= n; f++) dirs.push(path.join(base, `page_${pageIndex}`, String(f)));
+  }
+  return dirs;
+}
+
+async function ensureTrendDirs(userId, trendId, pageIds, folderCount = 1) {
+  const uid = String(userId).replace(/[/\\]/g, '_');
+  const base = path.join(TRENDS_DIR, uid, String(trendId));
+  const count = (pageIds && pageIds.length) ? pageIds.length : 0;
+  const n = Math.max(1, parseInt(folderCount, 10) || 1);
+  if (n === 1) {
+    for (let i = 1; i <= count; i++) await fs.mkdir(path.join(base, String(i)), { recursive: true });
+  } else {
+    for (let i = 1; i <= count; i++) {
+      for (let f = 1; f <= n; f++) await fs.mkdir(path.join(base, `page_${i}`, String(f)), { recursive: true });
+    }
+  }
+}
+
+function generatedDirForTrend(userId, trendId) {
+  const uid = String(userId).replace(/[/\\]/g, '_');
+  return path.join(GENERATED, uid, 'trends', String(trendId));
 }
 
 /** List all user IDs that have project/campaign data (for cron). */
@@ -380,6 +471,50 @@ function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+/** Path for persisting text-option usage counts per campaign/postType (folder index -> array of counts). */
+function textUsagePath(projectId, campaignId, postTypeId) {
+  const safe = (s) => String(s).replace(/[/\\]/g, '_');
+  return path.join(TEXT_USAGE_DIR, `${safe(projectId)}-${safe(campaignId)}-${safe(postTypeId)}.json`);
+}
+
+async function readTextOptionUsage(projectId, campaignId, postTypeId) {
+  const p = textUsagePath(projectId, campaignId, postTypeId);
+  try {
+    const raw = await fs.readFile(p, 'utf8');
+    const data = JSON.parse(raw);
+    return typeof data === 'object' && data !== null ? data : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+async function writeTextOptionUsage(projectId, campaignId, postTypeId, data) {
+  const p = textUsagePath(projectId, campaignId, postTypeId);
+  await fs.writeFile(p, JSON.stringify(data), 'utf8');
+}
+
+/**
+ * Pick one option from the list using least-used strategy: choose randomly among options
+ * that have the minimum usage count, then increment that option's count and persist.
+ * Returns the chosen text (or 'Sample text' if list is empty).
+ */
+async function pickLeastUsedTextOptionAndIncrement(projectId, campaignId, postTypeId, folderIndex, options) {
+  const opts = Array.isArray(options) ? options.filter((t) => t != null && String(t).trim()) : [];
+  if (opts.length === 0) return 'Sample text';
+  const key = String(folderIndex);
+  const usage = await readTextOptionUsage(projectId, campaignId, postTypeId);
+  let counts = Array.isArray(usage[key]) ? usage[key] : [];
+  while (counts.length < opts.length) counts.push(0);
+  counts = counts.slice(0, opts.length);
+  const minCount = Math.min(...counts);
+  const leastUsedIndices = counts.map((c, i) => (c === minCount ? i : -1)).filter((i) => i >= 0);
+  const chosenIndex = leastUsedIndices[Math.floor(Math.random() * leastUsedIndices.length)];
+  counts[chosenIndex] = (counts[chosenIndex] || 0) + 1;
+  const next = { ...usage, [key]: counts };
+  await writeTextOptionUsage(projectId, campaignId, postTypeId, next);
+  return String(opts[chosenIndex]).trim() || 'Sample text';
+}
+
 function escapeXml(s) {
   return String(s)
     .replace(/&/g, '&amp;')
@@ -389,16 +524,46 @@ function escapeXml(s) {
     .replace(/'/g, '&apos;');
 }
 
+/** Wrap text into lines that fit within maxCharsPerLine (approx). Keeps text within media bounds. */
+function wrapTextToLines(text, maxCharsPerLine) {
+  const str = String(text).trim() || 'Sample text';
+  if (maxCharsPerLine < 5) return [str];
+  const words = str.split(/\s+/);
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const next = line ? line + ' ' + word : word;
+    if (next.length <= maxCharsPerLine) {
+      line = next;
+    } else {
+      if (line) lines.push(line);
+      if (word.length > maxCharsPerLine) {
+        for (let i = 0; i < word.length; i += maxCharsPerLine) lines.push(word.slice(i, i + maxCharsPerLine));
+        line = '';
+      } else {
+        line = word;
+      }
+    }
+  }
+  if (line) lines.push(line);
+  return lines.length ? lines : [str];
+}
+
 const OUT_W = 1080;
 const OUT_H = 1920;
 
 async function addTextOverlay(imagePath, text, outputPath, textStyle = {}) {
-  const displayText = (typeof text === 'string' && text.trim()) ? text.trim() : 'Sample text';
+  const raw = (typeof text === 'string' && text.trim()) ? text.trim() : 'Sample text';
   const s = textStyle || {};
-  let fontSizeFrac = s.fontSize != null ? parseFloat(s.fontSize) : 0.06;
-  if (isNaN(fontSizeFrac) || fontSizeFrac <= 0) fontSizeFrac = 0.06;
-  if (fontSizeFrac > 1) fontSizeFrac = fontSizeFrac / 100;
-  let fontSize = fontSizeFrac * Math.min(OUT_W, OUT_H);
+  let v = s.fontSize != null ? parseFloat(s.fontSize) : 0.06;
+  if (isNaN(v) || v <= 0) v = 0.06;
+  let fontSize;
+  if (v >= 12 && v <= 200) {
+    fontSize = Math.round(v);
+  } else {
+    const frac = v > 1 ? v / 100 : v;
+    fontSize = frac * Math.min(OUT_W, OUT_H);
+  }
   if (fontSize < 12) fontSize = 12;
   let xPct = (s.x != null && s.x !== '' ? parseFloat(s.x) : 50);
   let yPct = (s.y != null && s.y !== '' ? parseFloat(s.y) : 92);
@@ -410,6 +575,16 @@ async function addTextOverlay(imagePath, text, outputPath, textStyle = {}) {
   }
   const xPx = Math.round((xPct / 100) * OUT_W);
   const yPx = Math.round((yPct / 100) * OUT_H);
+  const marginX = Math.round(OUT_W * 0.08);
+  const marginY = Math.round(OUT_H * 0.06);
+  const safeWidth = OUT_W - 2 * marginX;
+  const lineHeightPx = Math.round(fontSize * 1.25);
+  const maxCharsPerLine = Math.max(8, Math.floor(safeWidth / (fontSize * 0.6)));
+  const maxLines = Math.max(1, Math.floor((OUT_H - 2 * marginY) / lineHeightPx));
+  let lines = wrapTextToLines(raw, maxCharsPerLine);
+  if (lines.length > maxLines) lines = lines.slice(0, maxLines);
+  const blockHeightPx = lines.length * lineHeightPx;
+  const startY = yPx - Math.round(blockHeightPx / 2) + Math.round(lineHeightPx / 2);
   // Map UI font choices to Linux fonts (librsvg needs single quoted font name)
   const fontMap = {
     'arial, sans-serif': "'Liberation Sans'",
@@ -428,10 +603,14 @@ async function addTextOverlay(imagePath, text, outputPath, textStyle = {}) {
   const fontKey = String(textStyle.font || 'Arial, sans-serif').trim().toLowerCase();
   const font = fontMap[fontKey] || "'DejaVu Sans'";
   const color = textStyle.color || 'white';
-  let strokeWidth = Math.max(0, parseFloat(textStyle.strokeWidth) || 2);
+  let strokeWidth = Math.max(0, parseFloat(s.strokeWidth) || 2);
   const strokeColor = textStyle.strokeColor || 'black';
   const isLightFill = /^(white|#fff|#ffffff|rgb\s*\(\s*255\s*,\s*255\s*,\s*255\s*\))$/i.test(String(color).trim());
   if (isLightFill && strokeWidth < fontSize * 0.03) strokeWidth = Math.max(strokeWidth, Math.round(fontSize * 0.03));
+  const tspans = lines.map((line, i) => {
+    const y = startY + i * lineHeightPx;
+    return `<tspan x="${xPx}" y="${y}" text-anchor="middle" dominant-baseline="middle">${escapeXml(line)}</tspan>`;
+  }).join('\n        ');
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
     <svg width="${OUT_W}" height="${OUT_H}" viewBox="0 0 ${OUT_W} ${OUT_H}" xmlns="http://www.w3.org/2000/svg">
       <defs>
@@ -440,16 +619,15 @@ async function addTextOverlay(imagePath, text, outputPath, textStyle = {}) {
         </filter>
       </defs>
       <text
-        x="${xPx}" y="${yPx}"
-        text-anchor="middle"
-        dominant-baseline="middle"
         font-family="${escapeXml(font)}"
         font-size="${fontSize}"
         font-weight="bold"
         fill="${escapeXml(color)}"
         filter="url(#shadow)"
         style="stroke: ${escapeXml(strokeColor)}; stroke-width: ${strokeWidth}; paint-order: stroke fill;"
-      >${escapeXml(displayText)}</text>
+      >
+        ${tspans}
+      </text>
     </svg>
   `;
   const svgBuffer = Buffer.from(svg);
@@ -527,39 +705,115 @@ function fontColorToHex(str) {
   return '0xFFFFFF';
 }
 
-/** Overlay text on video using ffmpeg; writes to outputPath (mp4). */
-function addVideoTextOverlay(inputPath, text, textStyle, outputPath) {
-  const raw = (typeof text === 'string' && text.trim()) ? text.trim() : 'Sample text';
-  const displayText = raw.replace(/\\/g, '\\\\').replace(/'/g, "'\\''").replace(/:/g, '\\:');
-  const s = textStyle || {};
-  let fontSize = Math.max(12, Math.round(parseFloat(s.fontSize) || 0.06) * 100);
-  if (fontSize > 0 && fontSize < 200) fontSize = Math.round(1080 * (parseFloat(s.fontSize) || 0.06));
-  if (fontSize < 12) fontSize = 48;
-  let xPct = (s.x != null && s.x !== '' ? parseFloat(s.x) : 50) / 100;
-  let yPct = (s.y != null && s.y !== '' ? parseFloat(s.y) : 92) / 100;
-  if (Number.isNaN(xPct)) xPct = 0.5;
-  if (Number.isNaN(yPct)) yPct = 0.92;
-  if (xPct === 0) xPct = 0.01;
-  if (yPct === 0) yPct = 0.01;
-  const fontcolor = fontColorToHex(s.color);
-  const xExpr = `(main_w*${xPct})-text_w/2`;
-  const yExpr = `(main_h*${yPct})-text_h/2`;
-  const fontfilePath = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
-  const useFontfile = fsSync.existsSync(fontfilePath);
-  const drawtext = useFontfile
-    ? `drawtext=text='${displayText}':fontfile=${fontfilePath}:fontsize=${fontSize}:fontcolor=${fontcolor}:x=${xExpr}:y=${yExpr}`
-    : `drawtext=text='${displayText}':fontsize=${fontSize}:fontcolor=${fontcolor}:x=${xExpr}:y=${yExpr}`;
-  return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
-      .outputOptions([`-vf`, drawtext, '-c:a', 'copy'])
-      .output(outputPath)
-      .on('end', () => resolve())
-      .on('error', (err) => reject(new Error(err.message || 'FFmpeg failed')))
-      .run();
-  });
+/** Normalize fontSize to pixels: 12–200 = px; otherwise treat as fraction (0.01–1 or 1–100%) of 720. */
+function videoFontSizePx(textStyle) {
+  const v = parseFloat(textStyle.fontSize);
+  if (Number.isNaN(v) || v <= 0) return 48;
+  if (v >= 12 && v <= 200) return Math.round(v);
+  const frac = v > 1 ? v / 100 : v;
+  return Math.max(12, Math.min(Math.round(720 * frac), 200));
 }
 
-async function runCampaignPipelineVideoWithText(userId, projectId, campaignId, textStyleOverride, textOptionsOverride, postTypeId) {
+/** Escape for ffmpeg drawtext text= value. Single-quote: use '\'' so value parses correctly. */
+function escapeDrawtext(s) {
+  return String(s)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "'\\''")
+    .replace(/:/g, '\\:')
+    .replace(/%/g, '\\%');
+}
+
+/** Escape path for use in ffmpeg filter (colons must be escaped so they don't split options). */
+function escapeDrawtextPath(p) {
+  return String(p).replace(/\\/g, '\\\\').replace(/:/g, '\\:');
+}
+
+/** Overlay text on video using ffmpeg; writes to outputPath (mp4). Used for both preview and final run output—
+ *  so stroke, 1080x1920 crop, and text positioning apply to the final link. Uses textfile= to avoid quoting issues.
+ *  options.preview: if true, limit output to a short clip and use fewer threads to avoid OOM (SIGKILL) on constrained hosts. */
+async function addVideoTextOverlay(inputPath, text, textStyle, outputPath, options = {}) {
+  const isPreview = options.preview === true;
+  const raw = (typeof text === 'string' && text.trim()) ? text.trim() : 'Sample text';
+  const s = textStyle || {};
+  const fontSize = videoFontSizePx(s);
+  const W = 1080;
+  const H = 1920;
+  const marginX = Math.round(W * 0.08);
+  const marginY = Math.round(H * 0.06);
+  const safeWidth = W - 2 * marginX;
+  const approxCharWidth = fontSize * 0.6;
+  const maxCharsPerLine = Math.max(8, Math.floor(safeWidth / approxCharWidth));
+  const lineHeightPx = Math.round(fontSize * 1.25);
+  const maxLines = Math.max(1, Math.floor((H - 2 * marginY) / lineHeightPx));
+  const paragraphs = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  let lines = [];
+  for (const p of paragraphs) {
+    if (lines.length >= maxLines) break;
+    if (p.length <= maxCharsPerLine) {
+      lines.push(p);
+    } else {
+      const wrapped = wrapTextToLines(p, maxCharsPerLine);
+      for (const w of wrapped) {
+        if (lines.length >= maxLines) break;
+        lines.push(w);
+      }
+    }
+  }
+  if (lines.length === 0) lines = ['Sample text'];
+  lines = lines.slice(0, maxLines);
+
+  const fontcolor = fontColorToHex(s.color);
+  const strokeWidth = Math.max(0, Math.min(20, Math.round(parseFloat(s.strokeWidth ?? s.stroke) || 0)));
+  const strokeColor = fontColorToHex(s.strokeColor || s.strokeColor || 'black');
+  const baseOpts = `fontsize=${fontSize}:fontcolor=${fontcolor}${strokeWidth > 0 ? `:borderw=${strokeWidth}:bordercolor=${strokeColor}` : ''}`;
+  // 0 means "center"; otherwise use percentage (50 = center)
+  const rawX = (s.x != null && s.x !== '' && !Number.isNaN(parseFloat(s.x))) ? parseFloat(s.x) : 50;
+  const rawY = (s.y != null && s.y !== '' && !Number.isNaN(parseFloat(s.y))) ? parseFloat(s.y) : 50;
+  const xPct = rawX === 0 ? 50 : rawX;
+  const yPct = rawY === 0 ? 50 : rawY;
+  const blockHeightPx = lines.length * lineHeightPx;
+  const startYOffset = -Math.round(blockHeightPx / 2) + Math.round(lineHeightPx / 2);
+
+  const tmpDir = path.join(os.tmpdir(), `drawtext-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  await fs.mkdir(tmpDir, { recursive: true });
+  const tmpFiles = [];
+  try {
+    for (let i = 0; i < lines.length; i++) {
+      const tmpFile = path.join(tmpDir, `line${i}.txt`);
+      await fs.writeFile(tmpFile, lines[i].trim() || ' ', 'utf8');
+      tmpFiles.push(tmpFile);
+    }
+    const drawtextFilters = lines.map((line, i) => {
+      const textfilePath = tmpFiles[i];
+      const xExpr = `(w*${xPct}/100)-text_w/2`;
+      const yOffsetPx = startYOffset + i * lineHeightPx;
+      const yExpr = `(h*${yPct}/100)+${yOffsetPx}-text_h/2`;
+      return `drawtext=textfile='${escapeDrawtextPath(textfilePath)}':${baseOpts}:x='${xExpr}':y='${yExpr}'`;
+    });
+    const cropW = W;
+    const cropH = H;
+    const cropFilter = `scale=${cropW}:${cropH}:force_original_aspect_ratio=increase,crop=${cropW}:${cropH}:(iw-${cropW})/2:(ih-${cropH})/2`;
+    const vf = [cropFilter, ...drawtextFilters].join(',');
+    const outputOpts = [`-vf`, vf, '-c:a', 'copy', '-threads', isPreview ? '1' : '2'];
+    if (isPreview) outputOpts.push('-t', '5');
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(inputPath)
+        .outputOptions(outputOpts)
+        .output(outputPath)
+        .on('end', () => resolve())
+        .on('error', (err) => reject(new Error(err.message || 'FFmpeg failed')))
+        .run();
+    });
+  } finally {
+    for (const f of tmpFiles) {
+      try { await fs.unlink(f); } catch (_) {}
+    }
+    try { await fs.rmdir(tmpDir); } catch (_) {}
+  }
+}
+
+async function runCampaignPipelineVideoWithText(userId, projectId, campaignId, textStyleOverride, textOptionsOverride, postTypeId, opts = {}) {
   const campaign = getCampaignById(campaignId, userId);
   if (!campaign) throw new Error('Campaign not found');
   const pt = getPostType(campaign, postTypeId || 'default', projectId);
@@ -573,12 +827,14 @@ async function runCampaignPipelineVideoWithText(userId, projectId, campaignId, t
   const chosen = pickRandom(videos);
   if (!chosen) throw new Error('No videos in folder. Upload videos first.');
   const filename = chosen.filename || path.basename(chosen.path || chosen);
-  const textOptions = Array.isArray(textOptionsOverride) && textOptionsOverride.length
-    ? textOptionsOverride
-    : (Array.isArray(pt.textOptionsPerFolder) && pt.textOptionsPerFolder[0]?.length
-      ? pt.textOptionsPerFolder[0]
-      : DEFAULT_TEXT_OPTIONS);
-  const text = pickRandom(textOptions) || 'Follow for more';
+  const fromOverride = Array.isArray(textOptionsOverride) && textOptionsOverride.length && Array.isArray(textOptionsOverride[0]) && textOptionsOverride[0].length
+    ? textOptionsOverride[0]
+    : null;
+  const textOptions = fromOverride ||
+    (Array.isArray(pt.textOptionsPerFolder) && pt.textOptionsPerFolder[0]?.length ? pt.textOptionsPerFolder[0] : null) ||
+    (Array.isArray(campaign.textOptionsPerFolder) && campaign.textOptionsPerFolder[0]?.length ? campaign.textOptionsPerFolder[0] : null) ||
+    DEFAULT_TEXT_OPTIONS;
+  const text = await pickLeastUsedTextOptionAndIncrement(projectIdStr, campaignIdStr, postTypeId || 'default', 0, textOptions);
   const textStyle = textStyleOverride && textStyleOverride[0]
     ? textStyleOverride[0]
     : (pt.textStylePerFolder && pt.textStylePerFolder[0]) || {};
@@ -589,7 +845,7 @@ async function runCampaignPipelineVideoWithText(userId, projectId, campaignId, t
     const runId = Date.now();
     const outName = `video-${runId}.mp4`;
     const outPath = path.join(outDir, outName);
-    await addVideoTextOverlay(inputPath, text, textStyle, outPath);
+    await addVideoTextOverlay(inputPath, text, textStyle, outPath, { preview: opts.preview === true });
     const config = getConfig();
     const baseUrl = normalizeBaseUrl(config.baseUrl);
     let url;
@@ -682,6 +938,47 @@ async function runCampaignPipeline(userId, projectId, campaignId, textStyleOverr
   await fs.writeFile(
     path.join(RUNS_DIR, `${campaignIdStr}.json`),
     JSON.stringify({ campaignId: campaignIdStr, runId, webContentUrls, at: runData.at }, null, 2)
+  );
+  return runData;
+}
+
+async function runTrendPipeline(userId, trendId, textStyleOverride, textOptionsOverride) {
+  const trend = getTrendById(trendId, userId);
+  if (!trend) throw new Error('Trend not found');
+  const pageIds = trend.pageIds && trend.pageIds.length ? trend.pageIds : [];
+  if (!pageIds.length) throw new Error('Trend has no pages');
+  const textOptions = Array.isArray(textOptionsOverride) && textOptionsOverride.length
+    ? textOptionsOverride
+    : (Array.isArray(trend.textOptions) && trend.textOptions.length ? trend.textOptions : [...DEFAULT_TEXT_OPTIONS]);
+  const textStyle = (textStyleOverride && typeof textStyleOverride === 'object') ? textStyleOverride : (trend.textStyle || {});
+  const folderCount = Math.max(1, parseInt(trend.folderCount, 10) || 1);
+  const outDir = generatedDirForTrend(userId, trendId);
+  await fs.mkdir(outDir, { recursive: true });
+  const config = getConfig();
+  const baseUrl = normalizeBaseUrl(config.baseUrl);
+  const uidSeg = String(userId).replace(/[/\\]/g, '_');
+  const webContentUrls = [];
+  const runId = Date.now();
+  for (let i = 0; i < pageIds.length; i++) {
+    const pageIndex = i + 1;
+    const dirs = trendPageFolderDirs(userId, trendId, pageIndex, folderCount);
+    for (let f = 0; f < dirs.length; f++) {
+      const images = await listImages(dirs[f]);
+      const chosen = pickRandom(images);
+      if (!chosen) continue;
+      const text = pickRandom(textOptions) || 'Follow for more';
+      const outName = folderCount > 1 ? `trend-${runId}-page-${pageIndex}-folder-${f + 1}.jpg` : `trend-${runId}-page-${pageIndex}.jpg`;
+      const outPath = path.join(outDir, outName);
+      const imgBuf = await fs.readFile(chosen.path);
+      await addTextOverlay(imgBuf, text, outPath, textStyle);
+      const url = `${baseUrl}/generated/${uidSeg}/trends/${trendId}/${outName}`;
+      webContentUrls.push({ pageId: pageIds[i], folderNum: f + 1, url });
+    }
+  }
+  const runData = { trendId: String(trendId), runId, webContentUrls, at: new Date().toISOString() };
+  await fs.writeFile(
+    path.join(RUNS_DIR, `trend-${trendId}.json`),
+    JSON.stringify(runData, null, 2)
   );
   return runData;
 }
@@ -1020,12 +1317,24 @@ function getPostType(campaign, postTypeId, projectId) {
   return pt || pts[0] || null;
 }
 
+/** True if this specific post type is deployed for this page. */
+function isPostTypeDeployed(campaign, projectId, postTypeId) {
+  const pid = parseInt(projectId, 10);
+  const v = campaign.deployedByPage && campaign.deployedByPage[pid];
+  if (v === undefined || v === null) return !!campaign.deployed;
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'object' && v !== null) return !!v[postTypeId];
+  return false;
+}
+
+/** True if any post type on this page is deployed (for badges/lists). */
 function isPageDeployed(campaign, projectId) {
   const pid = parseInt(projectId, 10);
-  if (campaign.deployedByPage && typeof campaign.deployedByPage === 'object') {
-    return !!campaign.deployedByPage[pid];
-  }
-  return !!campaign.deployed;
+  const v = campaign.deployedByPage && campaign.deployedByPage[pid];
+  if (v === undefined || v === null) return !!campaign.deployed;
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'object' && v !== null) return Object.values(v).some((x) => !!x);
+  return false;
 }
 
 function normalizeCampaign(campaign, projectId) {
@@ -1124,7 +1433,12 @@ api.put('/projects/:projectId/campaigns/:campaignId', (req, res) => {
   else pagePts.push(updatedPt);
   pagePostTypes[projectId] = pagePts;
   const deployedByPage = { ...(campaign.deployedByPage || {}) };
-  if (req.body.deployed !== undefined) deployedByPage[projectId] = !!req.body.deployed;
+  if (req.body.deployed !== undefined) {
+    const prev = deployedByPage[projectId];
+    const next = typeof prev === 'object' && prev !== null ? { ...prev } : {};
+    next[postTypeId] = !!req.body.deployed;
+    deployedByPage[projectId] = next;
+  }
   const updated = {
     ...campaign,
     name: req.body.name !== undefined ? String(req.body.name).trim() || campaign.name : campaign.name,
@@ -1222,7 +1536,7 @@ api.put('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId', (req
   res.json(ensurePostTypes(updated, projectId));
 });
 
-api.delete('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId', (req, res) => {
+api.delete('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId', async (req, res) => {
   const uid = requireUserId(req, res);
   if (!uid) return;
   const campaignId = parseInt(req.params.campaignId, 10);
@@ -1230,6 +1544,11 @@ api.delete('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId', (
   const postTypeId = req.params.postTypeId;
   const campaign = getCampaignById(campaignId, uid);
   if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
+  try {
+    await storage.deleteAllUploadsForPostType(String(projectId), String(campaignId), postTypeId, uid);
+  } catch (e) {
+    console.warn('[delete post type] storage cleanup:', e.message);
+  }
   const pagePostTypes = { ...(campaign.pagePostTypes || {}) };
   const pagePts = (pagePostTypes[projectId] || []).filter((p) => p.id !== postTypeId);
   pagePostTypes[projectId] = pagePts;
@@ -1265,18 +1584,38 @@ api.post('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId/dupli
   res.status(201).json(ensurePostTypes(updated, targetPageId));
 });
 
-api.delete('/projects/:projectId/campaigns/:campaignId', (req, res) => {
+api.delete('/projects/:projectId/campaigns/:campaignId', async (req, res) => {
   const uid = requireUserId(req, res);
   if (!uid) return;
   const campaignId = parseInt(req.params.campaignId, 10);
+  const projectId = parseInt(req.params.projectId, 10);
   const campaign = getCampaignById(campaignId, uid);
-  if (!campaign || !campaignBelongsToPage(campaign, req.params.projectId)) return res.status(404).json({ error: 'Campaign not found' });
+  if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
   if (campaign.pageIds && campaign.pageIds.length > 1) {
-    const pid = parseInt(req.params.projectId, 10);
+    const pid = parseInt(projectId, 10);
+    const postTypesOnPage = getPostTypesForPage(campaign, pid);
+    const postTypeIds = (postTypesOnPage || []).map((pt) => pt.id);
+    try {
+      await storage.deleteAllUploadsForPageInCampaign(String(pid), String(campaignId), postTypeIds, uid);
+    } catch (e) {
+      console.warn('[remove page from campaign] storage cleanup:', e.message);
+    }
     const updated = { ...campaign, pageIds: campaign.pageIds.filter((id) => id !== pid) };
+    const { [pid]: _removed, ...restPagePostTypes } = updated.pagePostTypes || {};
+    updated.pagePostTypes = restPagePostTypes;
     if (updated.pageIds.length === 0) deleteCampaign(campaignId, uid);
     else saveCampaign(updated, uid);
   } else {
+    const pageIdsToClear = campaign.pageIds && campaign.pageIds.length ? campaign.pageIds : (campaign.projectId != null ? [campaign.projectId] : []);
+    for (const pageId of pageIdsToClear) {
+      const pts = getPostTypesForPage(campaign, pageId);
+      const ptIds = (pts || []).map((pt) => pt.id);
+      try {
+        await storage.deleteAllUploadsForPageInCampaign(String(pageId), String(campaignId), ptIds, uid);
+      } catch (e) {
+        console.warn('[delete campaign] storage cleanup:', e.message);
+      }
+    }
     deleteCampaign(campaignId, uid);
   }
   res.json({ ok: true });
@@ -1302,18 +1641,19 @@ api.get('/campaigns/:campaignId/deployed-posts-count', async (req, res) => {
     const byPage = {};
     for (const projectId of pageIds) {
       let pageTotal = 0;
-      if (!isPageDeployed(campaign, projectId)) {
-        byPage[projectId] = 0;
-        continue;
-      }
       const postTypes = getPostTypesForPage(campaign, projectId);
       for (const pt of postTypes) {
+        if (!isPostTypeDeployed(campaign, projectId, pt.id)) continue;
         if (pt.scheduleEnabled === false) continue;
         if (pt.mediaType === 'video') {
           const dirs = campaignDirs(uid, String(projectId), String(campaignId), 2, pt.id);
           const v1 = await listVideos(dirs[0]);
           const v2 = await listVideos(dirs[1]);
           pageTotal += Math.max(v1.length, v2.length);
+        } else if (pt.mediaType === 'video_text') {
+          const dirs = campaignDirs(uid, String(projectId), String(campaignId), 1, pt.id);
+          const videos = await listVideos(dirs[0]);
+          pageTotal += videos.length;
         } else {
           const folderCount = Math.max(1, pt.folderCount || 3);
           const dirs = campaignDirs(uid, String(projectId), String(campaignId), folderCount, pt.id);
@@ -1407,7 +1747,26 @@ api.put('/campaigns/:campaignId', (req, res) => {
     if (Array.isArray(req.body.memberUsernames)) {
       memberUsernames = req.body.memberUsernames.map((u) => String(u).trim()).filter(Boolean);
     }
-    const updated = { ...campaign, name, pageIds: validPageIds, releaseDate, releaseType, campaignStartDate, campaignEndDate, memberUsernames: memberUsernames || [] };
+    const notes = req.body.notes !== undefined ? String(req.body.notes || '') : campaign.notes;
+    let pageUgcTypes = campaign.pageUgcTypes && typeof campaign.pageUgcTypes === 'object' ? { ...campaign.pageUgcTypes } : {};
+    if (req.body.pageUgcTypes && typeof req.body.pageUgcTypes === 'object') {
+      pageUgcTypes = {};
+      for (const [k, v] of Object.entries(req.body.pageUgcTypes)) {
+        const pid = parseInt(k, 10);
+        if (!isNaN(pid) && (v === 'song_related' || v === 'not_related')) pageUgcTypes[pid] = v;
+      }
+    }
+    const previousPageIds = campaign.pageIds && campaign.pageIds.length ? campaign.pageIds : (campaign.projectId != null ? [campaign.projectId] : []);
+    const newlyAddedPageIds = validPageIds.filter((pid) => !previousPageIds.includes(pid));
+    const pagePostTypes = { ...(campaign.pagePostTypes || {}) };
+    validPageIds.forEach((pid) => {
+      if (newlyAddedPageIds.includes(pid)) {
+        pagePostTypes[pid] = [];
+      } else if (!Array.isArray(pagePostTypes[pid])) {
+        pagePostTypes[pid] = [];
+      }
+    });
+    const updated = { ...campaign, name, pageIds: validPageIds, releaseDate, releaseType, campaignStartDate, campaignEndDate, memberUsernames: memberUsernames || [], notes, pagePostTypes, pageUgcTypes };
     if (campaign.projectId != null && !campaign.pageIds) delete updated.projectId;
     saveCampaign(updated, uid);
     res.json(updated);
@@ -1616,6 +1975,34 @@ api.delete('/projects/:projectId/campaigns/:campaignId/folders/:folderNum/media/
   }
 });
 
+api.delete('/projects/:projectId/campaigns/:campaignId/folders/:folderNum/clear', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const projectId = String(req.params.projectId);
+    const campaignId = String(req.params.campaignId);
+    const folderNum = Math.max(1, parseInt(req.params.folderNum, 10));
+    const postTypeId = req.query.postTypeId || 'default';
+    const campaign = getCampaignById(campaignId, uid);
+    if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
+    const pt = getPostType(campaign, postTypeId, projectId);
+    if (!pt) return res.status(404).json({ error: 'Post type not found' });
+    const folderCount = pt.mediaType === 'video' ? 2 : (pt.mediaType === 'video_text' ? 1 : Math.max(1, pt.folderCount || 3));
+    const dirs = campaignDirs(uid, projectId, campaignId, folderCount, pt.id);
+    const dir = dirs[folderNum - 1];
+    if (!dir) return res.status(400).json({ error: 'Invalid folder' });
+    const isVideo = pt.mediaType === 'video' || pt.mediaType === 'video_text';
+    const files = isVideo ? await listVideos(dir) : await listImages(dir);
+    for (const file of files) {
+      const name = file.filename || (file.path && path.basename(file.path));
+      if (name) await deleteFolderFile(uid, projectId, campaignId, folderNum, name, postTypeId).catch(() => {});
+    }
+    res.json({ ok: true, deleted: files.length });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
 api.get('/projects/:projectId/campaigns/:campaignId/folders/:folderNum/images/:filename', (req, res) => {
   const uid = requireUserId(req, res);
   if (!uid) return;
@@ -1679,7 +2066,14 @@ api.get('/calendar', async (req, res) => {
     const items = [];
     const countByKey = {};
     const getMinFolderCount = async (projectId, campaignId, pt) => {
-      if (!pt || pt.mediaType === 'video') return Infinity;
+      if (!pt) return 0;
+      if (pt.mediaType === 'video') return Infinity;
+      if (pt.mediaType === 'video_text') {
+        const folderCount = 1;
+        const dirs = campaignDirs(uid, String(projectId), String(campaignId), folderCount, pt.id);
+        const files = await listVideos(dirs[0]);
+        return files.length;
+      }
       const folderCount = Math.max(1, pt.folderCount || 3);
       const dirs = campaignDirs(uid, String(projectId), String(campaignId), folderCount, pt.id);
       let min = Infinity;
@@ -1689,16 +2083,17 @@ api.get('/calendar', async (req, res) => {
       }
       return min === Infinity ? 0 : min;
     };
-    for (let d = 0; d < 7; d++) {
+    const calendarDays = 90;
+    for (let d = 0; d < calendarDays; d++) {
       const date = new Date(today);
       date.setDate(date.getDate() + d);
       const dateStr = date.toISOString().slice(0, 10);
       const dayOfWeek = date.getDay();
-      const campaignsToCheck = allCampaigns.filter((c) => isPageDeployed(c, c.projectId));
-      for (const c of campaignsToCheck) {
+      for (const c of allCampaigns) {
         const postTypes = getPostTypesForPage(c, c.projectId);
         const pts = postTypes.length ? postTypes : [];
         for (const pt of pts) {
+          if (!isPostTypeDeployed(c, c.projectId, pt.id)) continue;
           if (pt.scheduleEnabled === false) continue;
           const times = pt.scheduleTimes || c.scheduleTimes || [];
           const startDate = pt.scheduleStartDate || c.scheduleStartDate || c.campaignStartDate;
@@ -1712,9 +2107,10 @@ api.get('/calendar', async (req, res) => {
             countByKey[key] = { added: 0, max: await getMinFolderCount(c.projectId, c.id, pt) };
           }
           const { added, max } = countByKey[key];
-          if (pt.mediaType === 'photo' && added >= max) continue;
+          const capped = pt.mediaType === 'photo' || pt.mediaType === 'video_text';
+          if (capped && added >= max) continue;
           for (const t of times) {
-            if (pt.mediaType === 'photo' && countByKey[key].added >= countByKey[key].max) break;
+            if (capped && countByKey[key].added >= countByKey[key].max) break;
             const [h, m] = t.split(':').map(Number);
             items.push({
               date: dateStr,
@@ -1725,7 +2121,7 @@ api.get('/calendar', async (req, res) => {
               campaignName: c.name,
               campaignId: c.id,
             });
-            if (pt.mediaType === 'photo') countByKey[key].added++;
+            if (capped) countByKey[key].added++;
           }
         }
       }
@@ -1828,27 +2224,26 @@ api.post('/projects/:projectId/campaigns/:campaignId/preview', async (req, res) 
       try {
         const textStyleOverride = Array.isArray(req.body.textStylePerFolder) ? req.body.textStylePerFolder : null;
         const textOptionsOverride = Array.isArray(req.body.textOptionsPerFolder) ? req.body.textOptionsPerFolder : null;
-        const result = await runCampaignPipelineVideoWithText(uid, projectId, campaignId, textStyleOverride, textOptionsOverride, postTypeId);
+        const result = await runCampaignPipelineVideoWithText(uid, projectId, campaignId, textStyleOverride, textOptionsOverride, postTypeId, { preview: true });
         const url = result.webContentUrls && result.webContentUrls[0] ? result.webContentUrls[0] : null;
         return res.json({ url: url || '', base64: null });
       } catch (e) {
         const msg = (e && e.message) ? String(e.message) : '';
-        const friendly = /cannot find ffmpeg|ffmpeg not found|enoent.*ffmpeg/i.test(msg)
-          ? 'Video preview requires ffmpeg on the server. It is now installed in the Dockerfile—redeploy to enable preview.'
-          : msg || 'Video preview failed';
+        let friendly = msg || 'Video preview failed';
+        if (/cannot find ffmpeg|ffmpeg not found|enoent.*ffmpeg/i.test(msg)) {
+          friendly = 'Video preview requires ffmpeg on the server. It is now installed in the Dockerfile—redeploy to enable preview.';
+        } else if (/SIGKILL|killed|signal/i.test(msg)) {
+          friendly = 'Preview was stopped (server ran out of memory or hit a resource limit). Try again, or use a shorter/smaller video for preview.';
+        }
         return res.status(500).json({ error: friendly });
       }
     }
     const folderNum = Math.max(1, Math.min(999, parseInt(req.body.folderNum || '1', 10)));
     const textStyle = req.body.textStyle && typeof req.body.textStyle === 'object' ? req.body.textStyle : {};
-    let sampleText = String(req.body.sampleText || '').trim();
-    if (!sampleText && Array.isArray(req.body.textOptionsPerFolder) && req.body.textOptionsPerFolder[folderNum - 1]?.[0]) {
-      sampleText = String(req.body.textOptionsPerFolder[folderNum - 1][0]).slice(0, 200);
-    }
-    if (!sampleText) {
-      const opts = (pt.textOptionsPerFolder || campaign.textOptionsPerFolder || [])[folderNum - 1];
-      sampleText = (Array.isArray(opts) && opts[0]) ? String(opts[0]).slice(0, 200) : 'Sample text';
-    }
+    const optsFromBody = Array.isArray(req.body.textOptionsPerFolder) ? req.body.textOptionsPerFolder[folderNum - 1] : null;
+    const optsFromPt = (pt.textOptionsPerFolder || campaign.textOptionsPerFolder || [])[folderNum - 1];
+    const opts = Array.isArray(optsFromBody) && optsFromBody.length ? optsFromBody : (Array.isArray(optsFromPt) ? optsFromPt : []);
+    const sampleText = await pickLeastUsedTextOptionAndIncrement(projectId, campaignId, postTypeId, folderNum - 1, opts);
     const folderCount = Math.max(1, pt.folderCount || 3);
     const dirs = campaignDirs(uid, projectId, campaignId, folderCount, pt.id);
     const dir = dirs[folderNum - 1];
@@ -1954,6 +2349,308 @@ api.delete('/projects/:projectId/campaigns/:campaignId/latest', async (req, res)
     const runPath = path.join(RUNS_DIR, `${campaignId}.json`);
     await fs.unlink(runPath).catch(() => {});
     const genDir = generatedDir(uid, projectId, campaignId);
+    const files = await fs.readdir(genDir).catch(() => []);
+    for (const f of files) await fs.unlink(path.join(genDir, f)).catch(() => {});
+    res.json({ webContentUrls: [] });
+  } catch {
+    res.json({ webContentUrls: [] });
+  }
+});
+
+// --- API: Trends ---
+api.get('/trends', (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  let items = getAllTrends(uid);
+  const campaignId = req.query.campaignId != null ? String(req.query.campaignId) : null;
+  if (campaignId) items = items.filter((t) => String(t.campaignId) === campaignId);
+  res.json(items);
+});
+
+api.post('/trends', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const name = (req.body.name || 'New trend').trim() || 'New trend';
+    let pageIds = Array.isArray(req.body.pageIds) ? req.body.pageIds.map((id) => parseInt(id, 10)).filter((id) => !isNaN(id)) : [];
+    const campaignId = req.body.campaignId != null ? String(req.body.campaignId) : null;
+    if (!pageIds.length && campaignId) {
+      const campaign = getCampaignById(campaignId, uid);
+      if (campaign) pageIds = (campaign.pageIds && campaign.pageIds.length) ? campaign.pageIds : (campaign.projectId != null ? [campaign.projectId] : []);
+    }
+    if (!pageIds.length) return res.status(400).json({ error: 'Select at least one page' });
+    const projects = getProjects(uid);
+    const validPageIds = pageIds.filter((pid) => projects.some((p) => p.id === pid));
+    if (!validPageIds.length) return res.status(400).json({ error: 'No valid pages selected' });
+    const meta = getTrendsMeta(uid);
+    const folderCount = Math.max(1, parseInt(req.body.folderCount, 10) || 3);
+    const trend = {
+      id: meta.nextId,
+      name,
+      pageIds: validPageIds,
+      folderCount,
+      textOptions: [...DEFAULT_TEXT_OPTIONS],
+      textStyle: {},
+      pageSchedules: {},
+      campaignId: campaignId || undefined,
+      createdAt: new Date().toISOString(),
+    };
+    saveTrend(trend, uid);
+    await ensureTrendDirs(uid, trend.id, trend.pageIds, trend.folderCount);
+    res.status(201).json(trend);
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.get('/trends/:trendId', (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  const trend = getTrendById(req.params.trendId, uid);
+  if (!trend) return res.status(404).json({ error: 'Trend not found' });
+  const folderCount = trend.folderCount != null ? Math.max(1, parseInt(trend.folderCount, 10) || 3) : 1;
+  res.json({ ...trend, folderCount });
+});
+
+api.put('/trends/:trendId', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const trendId = parseInt(req.params.trendId, 10);
+    const trend = getTrendById(trendId, uid);
+    if (!trend) return res.status(404).json({ error: 'Trend not found' });
+    const name = req.body.name !== undefined ? (String(req.body.name || '').trim() || trend.name) : trend.name;
+    let pageIds = trend.pageIds && trend.pageIds.length ? [...trend.pageIds] : [];
+    if (Array.isArray(req.body.pageIds)) {
+      const projects = getProjects(uid);
+      pageIds = req.body.pageIds.map((id) => parseInt(id, 10)).filter((id) => !isNaN(id)).filter((pid) => projects.some((p) => p.id === pid));
+    }
+    const textOptions = Array.isArray(req.body.textOptions) ? req.body.textOptions : trend.textOptions;
+    const textStyle = req.body.textStyle && typeof req.body.textStyle === 'object' ? req.body.textStyle : trend.textStyle;
+    const pageSchedules = req.body.pageSchedules && typeof req.body.pageSchedules === 'object' ? req.body.pageSchedules : trend.pageSchedules;
+    const folderCount = req.body.folderCount !== undefined ? Math.max(1, parseInt(req.body.folderCount, 10) || 3) : (trend.folderCount != null ? Math.max(1, parseInt(trend.folderCount, 10) || 3) : 1);
+    const campaignId = req.body.campaignId !== undefined ? (req.body.campaignId != null ? String(req.body.campaignId) : undefined) : trend.campaignId;
+    const updated = { ...trend, name, pageIds, textOptions, textStyle, pageSchedules, folderCount, campaignId };
+    saveTrend(updated, uid);
+    await ensureTrendDirs(uid, trendId, updated.pageIds, updated.folderCount);
+    res.json(updated);
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.delete('/trends/:trendId', (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  const trend = getTrendById(req.params.trendId, uid);
+  if (!trend) return res.status(404).json({ error: 'Trend not found' });
+  deleteTrend(trend.id, uid);
+  res.json({ ok: true });
+});
+
+api.get('/trends/:trendId/pages/:pageIndex/images', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const trendId = String(req.params.trendId);
+    const pageIndex = Math.max(1, Math.min(999, parseInt(req.params.pageIndex, 10)));
+    const trend = getTrendById(trendId, uid);
+    if (!trend) return res.status(404).json({ error: 'Trend not found' });
+    const pageIds = trend.pageIds && trend.pageIds.length ? trend.pageIds : [];
+    if (pageIndex > pageIds.length) return res.status(404).json({ error: 'Page index out of range' });
+    const folderCount = Math.max(1, parseInt(trend.folderCount, 10) || 1);
+    const dirs = trendPageFolderDirs(uid, trendId, pageIndex, folderCount);
+    const dir = dirs[0];
+    const files = await listImages(dir);
+    res.json({ images: files.map((f) => f.filename || path.basename(f.path || f)) });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.get('/trends/:trendId/pages/:pageIndex/folders', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const trendId = String(req.params.trendId);
+    const pageIndex = Math.max(1, Math.min(999, parseInt(req.params.pageIndex, 10)));
+    const trend = getTrendById(trendId, uid);
+    if (!trend) return res.status(404).json({ error: 'Trend not found' });
+    const pageIds = trend.pageIds && trend.pageIds.length ? trend.pageIds : [];
+    if (pageIndex > pageIds.length) return res.status(404).json({ error: 'Page index out of range' });
+    const folderCount = Math.max(1, parseInt(trend.folderCount, 10) || 3);
+    const dirs = trendPageFolderDirs(uid, trendId, pageIndex, folderCount);
+    const result = {};
+    for (let f = 1; f <= folderCount; f++) {
+      const files = await listImages(dirs[f - 1]);
+      result[`folder${f}`] = files.map((item) => item.filename || path.basename(item.path || item));
+    }
+    res.json({ folderCount, folders: result });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.get('/trends/:trendId/pages/:pageIndex/folders/:folderNum/images', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const trendId = String(req.params.trendId);
+    const pageIndex = Math.max(1, Math.min(999, parseInt(req.params.pageIndex, 10)));
+    const folderNum = Math.max(1, Math.min(999, parseInt(req.params.folderNum, 10)));
+    const trend = getTrendById(trendId, uid);
+    if (!trend) return res.status(404).json({ error: 'Trend not found' });
+    const pageIds = trend.pageIds && trend.pageIds.length ? trend.pageIds : [];
+    if (pageIndex > pageIds.length) return res.status(404).json({ error: 'Page index out of range' });
+    const folderCount = Math.max(1, parseInt(trend.folderCount, 10) || 3);
+    if (folderNum > folderCount) return res.status(404).json({ error: 'Folder index out of range' });
+    const dirs = trendPageFolderDirs(uid, trendId, pageIndex, folderCount);
+    const files = await listImages(dirs[folderNum - 1]);
+    res.json({ images: files.map((f) => f.filename || path.basename(f.path || f)) });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.post('/trends/:trendId/pages/:pageIndex/folders/:folderNum/upload', upload.array('photo', 100), async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const trendId = String(req.params.trendId);
+    const pageIndex = Math.max(1, Math.min(999, parseInt(req.params.pageIndex, 10)));
+    const folderNum = Math.max(1, Math.min(999, parseInt(req.params.folderNum, 10)));
+    const trend = getTrendById(trendId, uid);
+    if (!trend) return res.status(404).json({ error: 'Trend not found' });
+    const pageIds = trend.pageIds && trend.pageIds.length ? trend.pageIds : [];
+    if (pageIndex > pageIds.length) return res.status(404).json({ error: 'Page index out of range' });
+    const folderCount = Math.max(1, parseInt(trend.folderCount, 10) || 3);
+    if (folderNum > folderCount) return res.status(404).json({ error: 'Folder index out of range' });
+    const dirs = trendPageFolderDirs(uid, trendId, pageIndex, folderCount);
+    const dir = dirs[folderNum - 1];
+    await fs.mkdir(dir, { recursive: true });
+    const files = req.files || [];
+    for (const file of files) {
+      const ext = path.extname(file.originalname) || '.jpg';
+      const name = file.filename || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+      const dest = path.join(dir, name);
+      await fs.rename(file.path, dest).catch(() => fs.copyFile(file.path, dest));
+      try { await fs.unlink(file.path); } catch (_) {}
+    }
+    res.json({ ok: true, count: files.length });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.post('/trends/:trendId/pages/:pageIndex/upload', upload.array('photo', 100), async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const trendId = String(req.params.trendId);
+    const pageIndex = Math.max(1, Math.min(999, parseInt(req.params.pageIndex, 10)));
+    const trend = getTrendById(trendId, uid);
+    if (!trend) return res.status(404).json({ error: 'Trend not found' });
+    const pageIds = trend.pageIds && trend.pageIds.length ? trend.pageIds : [];
+    if (pageIndex > pageIds.length) return res.status(404).json({ error: 'Page index out of range' });
+    const folderCount = Math.max(1, parseInt(trend.folderCount, 10) || 1);
+    const dirs = trendPageFolderDirs(uid, trendId, pageIndex, folderCount);
+    const dir = dirs[0];
+    await fs.mkdir(dir, { recursive: true });
+    const files = req.files || [];
+    for (const file of files) {
+      const ext = path.extname(file.originalname) || '.jpg';
+      const name = file.filename || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+      const dest = path.join(dir, name);
+      await fs.rename(file.path, dest).catch(() => fs.copyFile(file.path, dest));
+      try { await fs.unlink(file.path); } catch (_) {}
+    }
+    res.json({ ok: true, count: files.length });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.post('/trends/:trendId/preview', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const trendId = String(req.params.trendId);
+    const pageIndex = Math.max(1, Math.min(999, parseInt(req.body.pageIndex, 10) || 1));
+    const folderNum = Math.max(1, Math.min(999, parseInt(req.body.folderNum, 10) || 1));
+    const trend = getTrendById(trendId, uid);
+    if (!trend) return res.status(404).json({ error: 'Trend not found' });
+    const pageIds = trend.pageIds && trend.pageIds.length ? trend.pageIds : [];
+    if (pageIndex > pageIds.length) return res.status(404).json({ error: 'Page index out of range' });
+    const folderCount = Math.max(1, parseInt(trend.folderCount, 10) || 3);
+    if (folderNum > folderCount) return res.status(404).json({ error: 'Folder index out of range' });
+    const dirs = trendPageFolderDirs(uid, trendId, pageIndex, folderCount);
+    const images = await listImages(dirs[folderNum - 1]);
+    const chosen = images[0] || null;
+    if (!chosen) return res.status(400).json({ error: 'No images in folder. Add photos to preview.' });
+    const imgBuf = await fs.readFile(chosen.path);
+    const textOptions = Array.isArray(req.body.textOptions) && req.body.textOptions.length ? req.body.textOptions : (trend.textOptions || DEFAULT_TEXT_OPTIONS);
+    const sampleText = (req.body.sampleText && String(req.body.sampleText).trim()) || (textOptions[0] && String(textOptions[0]).trim()) || 'Sample text';
+    const textStyle = req.body.textStyle && typeof req.body.textStyle === 'object' ? req.body.textStyle : (trend.textStyle || {});
+    const normStyle = {
+      x: textStyle.x != null ? parseFloat(textStyle.x) : 50,
+      y: textStyle.y != null ? parseFloat(textStyle.y) : 92,
+      fontSize: textStyle.fontSize != null ? parseFloat(textStyle.fontSize) : 48,
+      font: textStyle.font || 'Arial, sans-serif',
+      color: textStyle.color || 'white',
+      strokeWidth: textStyle.strokeWidth != null ? parseFloat(textStyle.strokeWidth) : 2,
+    };
+    const uidSeg = String(uid).replace(/[/\\]/g, '_');
+    const outDir = generatedDirForTrend(uid, trendId);
+    await fs.mkdir(outDir, { recursive: true });
+    const outName = `preview-${pageIndex}-${folderNum}-${Date.now()}.jpg`;
+    const outPath = path.join(outDir, outName);
+    await addTextOverlay(imgBuf, sampleText, outPath, normStyle);
+    const config = getConfig();
+    let baseUrl = normalizeBaseUrl(config.baseUrl);
+    if (!baseUrl && req && req.get('host')) {
+      const proto = (req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+      baseUrl = `${proto}://${req.get('host')}`;
+    }
+    const url = `${baseUrl}/generated/${uidSeg}/trends/${trendId}/${outName}`;
+    res.json({ url });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.post('/trends/:trendId/run', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const trendId = parseInt(req.params.trendId, 10);
+    const textStyleOverride = req.body.textStyle && typeof req.body.textStyle === 'object' ? req.body.textStyle : null;
+    const textOptionsOverride = Array.isArray(req.body.textOptions) && req.body.textOptions.length ? req.body.textOptions : null;
+    const result = await runTrendPipeline(uid, trendId, textStyleOverride, textOptionsOverride);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.get('/trends/:trendId/latest', async (req, res) => {
+  try {
+    const trendId = String(req.params.trendId);
+    const filePath = path.join(RUNS_DIR, `trend-${trendId}.json`);
+    const data = await fs.readFile(filePath, 'utf8').catch(() => '{}');
+    res.json(JSON.parse(data));
+  } catch {
+    res.json({ webContentUrls: [] });
+  }
+});
+
+api.delete('/trends/:trendId/latest', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const trendId = String(req.params.trendId);
+    const runPath = path.join(RUNS_DIR, `trend-${trendId}.json`);
+    await fs.unlink(runPath).catch(() => {});
+    const genDir = generatedDirForTrend(uid, trendId);
     const files = await fs.readdir(genDir).catch(() => []);
     for (const f of files) await fs.unlink(path.join(genDir, f)).catch(() => {});
     res.json({ webContentUrls: [] });
@@ -2183,6 +2880,17 @@ function serveGeneratedImage(req, res) {
 }
 api.get('/generated/:userId/:projectId/:campaignId/:filename', serveGeneratedImage);
 app.get('/generated/:userId/:projectId/:campaignId/:filename', serveGeneratedImage);
+// Trend generated images: /generated/:userId/trends/:trendId/:filename
+app.get('/generated/:userId/trends/:trendId/:filename', (req, res) => {
+  const { userId, trendId, filename } = req.params;
+  if (!filename || /[\/\\]/.test(filename)) return res.status(400).end();
+  const uid = (userId || '').replace(/\.\./g, '');
+  const filePath = path.join(GENERATED, uid, 'trends', trendId, filename);
+  const generatedResolved = path.resolve(GENERATED);
+  if (!path.resolve(filePath).startsWith(generatedResolved)) return res.status(403).end();
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.sendFile(path.resolve(filePath), (err) => { if (err) res.status(err.statusCode || 500).end(); });
+});
 // Legacy: no userId (try old path for backward compat)
 app.get('/generated/:projectId/:campaignId/:filename', (req, res) => {
   req.params.userId = '';
@@ -2246,9 +2954,9 @@ cron.schedule('* * * * *', async () => {
     for (const c of campaigns) {
       const pageIds = (c.pageIds && c.pageIds.length) ? c.pageIds : (c.projectId != null ? [c.projectId] : []);
       for (const projectId of pageIds) {
-        if (!isPageDeployed(c, projectId)) continue;
         const postTypes = getPostTypesForPage(c, projectId);
         for (const pt of postTypes) {
+          if (!isPostTypeDeployed(c, projectId, pt.id)) continue;
           if (!pt.scheduleEnabled || !(pt.scheduleTimes || []).includes(currentTime)) continue;
           if (pt.scheduleStartDate && todayStr < pt.scheduleStartDate) continue;
           if (pt.scheduleEndDate && todayStr > pt.scheduleEndDate) continue;

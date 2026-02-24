@@ -39,16 +39,21 @@ Blotato must be able to fetch your generated images. Deploy the app to a public 
 - **Railway / Render / Fly.io**: Deploy the repo, set `PORT` if needed, use the provided URL as Base URL.
 - **VPS**: Run `npm start` behind nginx with SSL (Let's Encrypt).
 
-### Railway: fixing 404 on generated links
+### Railway: persisting all data (recommended)
 
-Railway uses an ephemeral filesystem. Generated images may return 404 when:
-- Multiple instances are running (file created on instance A, request hits instance B)
-- The container restarts and files are lost
+Railway’s filesystem is ephemeral: redeploys and restarts wipe local files. To keep **all** app data (projects, campaigns, trends, logins, uploads, generated images) across redeploys:
 
-**Solutions:**
-1. **Single instance** — In Railway → Settings → Scaling, set replicas to 1.
-2. **Railway Volumes** — Create a volume and set mount path to `/data`. Add env vars: `GENERATED_DIR=/data/generated` and `UPLOADS_DIR=/data/uploads`.
-3. **In-app display** — The Run response now includes base64 images. Thumbnails in the app will display correctly even when the URLs 404 (e.g. for Blotato, ensure single instance or volumes so URLs work).
+1. **Create a Volume** — In your Railway project → Sound Surge service → **Volumes** → **Add Volume**. Set the mount path to **`/data`**.
+2. **Set variables** — In **Variables**, add:
+   - **`DATA_DIR`** = `/data`  
+     This stores projects, campaigns, trends, config, logins, avatars, runs, and trend uploads on the volume.
+   - **`GENERATED_DIR`** = `/data/generated` (optional; if unset, uses `DATA_DIR/generated`)
+   - **`UPLOADS_DIR`** = `/data/uploads` (optional; if unset, uses `DATA_DIR/uploads`)
+
+   If you set only **`DATA_DIR=/data`**, everything (JSON data, uploads, generated) is stored under `/data` and persists.
+3. **Single instance** — In **Settings** → Scaling, set replicas to **1** so all requests hit the same instance and volume.
+
+After this, redeploys and restarts keep your accounts, campaigns, trends, and media. You can update the app without losing data.
 
 ## Data layout
 

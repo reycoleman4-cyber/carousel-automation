@@ -65,8 +65,11 @@ async function initStorage() {
 }
 
 // --- Local disk helpers (used when not using Supabase) ---
+function getDataRoot() {
+  return process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(ROOT, 'data');
+}
 function localUploadsPath(projectId, campaignId, postTypeId, folderNum, userId) {
-  const uploadsBase = process.env.UPLOADS_DIR ? path.resolve(process.env.UPLOADS_DIR) : path.join(ROOT, 'uploads');
+  const uploadsBase = process.env.UPLOADS_DIR ? path.resolve(process.env.UPLOADS_DIR) : path.join(getDataRoot(), 'uploads');
   const base = userId
     ? path.join(uploadsBase, String(userId).replace(/[/\\]/g, '_'), String(projectId), String(campaignId))
     : path.join(uploadsBase, String(projectId), String(campaignId));
@@ -75,14 +78,14 @@ function localUploadsPath(projectId, campaignId, postTypeId, folderNum, userId) 
 }
 
 function localGeneratedPath(projectId, campaignId, userId) {
-  const genBase = process.env.GENERATED_DIR ? path.resolve(process.env.GENERATED_DIR) : path.join(ROOT, 'generated');
+  const genBase = process.env.GENERATED_DIR ? path.resolve(process.env.GENERATED_DIR) : path.join(getDataRoot(), 'generated');
   return userId
     ? path.join(genBase, String(userId).replace(/[/\\]/g, '_'), String(projectId), String(campaignId))
     : path.join(genBase, String(projectId), String(campaignId));
 }
 
 function localUsedPath(projectId, userId) {
-  const uploadsBase = process.env.UPLOADS_DIR ? path.resolve(process.env.UPLOADS_DIR) : path.join(ROOT, 'uploads');
+  const uploadsBase = process.env.UPLOADS_DIR ? path.resolve(process.env.UPLOADS_DIR) : path.join(getDataRoot(), 'uploads');
   return userId
     ? path.join(uploadsBase, String(userId).replace(/[/\\]/g, '_'), String(projectId), 'used')
     : path.join(uploadsBase, String(projectId), 'used');
@@ -173,6 +176,58 @@ async function deleteFile(projectId, campaignId, postTypeId, folderNum, filename
   await fs.unlink(path.join(dir, filename));
 }
 
+/** Delete all uploaded files (photos/videos) for a single post type. Call when deleting a post type. */
+async function deleteAllUploadsForPostType(projectId, campaignId, postTypeId, userId) {
+  if (supabase) {
+    const prefix = pathPrefix(userId);
+    const base = postTypeId && postTypeId !== 'default'
+      ? `${projectId}/${campaignId}/pt_${postTypeId}`
+      : `${projectId}/${campaignId}`;
+    const folderPath = `${prefix}${base}`;
+    const { data: topLevel, error: listError } = await supabase.storage.from(UPLOADS_BUCKET).list(folderPath, { limit: 100 });
+    if (listError || !topLevel) return;
+    const toRemove = [];
+    for (const item of topLevel) {
+      if (!item.name || item.name.startsWith('.')) continue;
+      const subPath = `${folderPath}/${item.name}`;
+      const { data: files, error: subError } = await supabase.storage.from(UPLOADS_BUCKET).list(subPath, { limit: 2000 });
+      if (subError || !files) continue;
+      for (const f of files) {
+        if (f.name && !f.name.startsWith('.')) toRemove.push(`${subPath}/${f.name}`);
+      }
+    }
+    for (let i = 0; i < toRemove.length; i += 500) {
+      const batch = toRemove.slice(i, i + 500);
+      await supabase.storage.from(UPLOADS_BUCKET).remove(batch);
+    }
+    return;
+  }
+  const uploadsBase = process.env.UPLOADS_DIR ? path.resolve(process.env.UPLOADS_DIR) : path.join(getDataRoot(), 'uploads');
+  const base = userId
+    ? path.join(uploadsBase, String(userId).replace(/[/\\]/g, '_'), String(projectId), String(campaignId))
+    : path.join(uploadsBase, String(projectId), String(campaignId));
+  const ptDir = postTypeId && postTypeId !== 'default' ? path.join(base, `pt_${postTypeId}`) : base;
+  try {
+    const entries = await fs.readdir(ptDir, { withFileTypes: true });
+    for (const ent of entries) {
+      if (!ent.isDirectory() || !ent.name.startsWith('folder')) continue;
+      const folderPath = path.join(ptDir, ent.name);
+      const names = await fs.readdir(folderPath);
+      for (const name of names) {
+        await fs.unlink(path.join(folderPath, name)).catch(() => {});
+      }
+      await fs.rmdir(folderPath).catch(() => {});
+    }
+  } catch (_) {}
+}
+
+/** Delete all uploaded files for every post type on a given page in a campaign. Call when removing a page from a campaign. */
+async function deleteAllUploadsForPageInCampaign(projectId, campaignId, postTypeIds, userId) {
+  for (const postTypeId of postTypeIds) {
+    await deleteAllUploadsForPostType(projectId, campaignId, postTypeId, userId);
+  }
+}
+
 // --- Generated images / videos ---
 async function uploadGenerated(projectId, campaignId, filename, buffer, contentType, userId) {
   if (supabase) {
@@ -242,6 +297,8 @@ module.exports = {
   uploadFile,
   getFileUrl,
   deleteFile,
+  deleteAllUploadsForPostType,
+  deleteAllUploadsForPageInCampaign,
   uploadGenerated,
   getGeneratedUrl,
   readGeneratedBuffer,
