@@ -731,6 +731,16 @@ function formatReleaseDate(dateStr) {
   return `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
 }
 
+/** True if this campaign is the recurring page's own content (not a shared campaign). */
+function isRecurringContentCampaign(project, campaign) {
+  return (project.pageType || 'recurring') === 'recurring' && campaign.name === 'Recurring posts';
+}
+
+/** Display title for a campaign; for recurring page content shows "Your content". */
+function campaignDisplayTitle(project, campaign) {
+  return isRecurringContentCampaign(project, campaign) ? 'Your content' : (campaign.name || 'Campaign');
+}
+
 function getCampaignPostsPerWeek(campaign, deployedOnly) {
   if (deployedOnly && !campaign.deployed) return 0;
   const pts = campaign.postTypes || [];
@@ -1026,12 +1036,13 @@ function renderProject(projectId) {
       list.innerHTML = sorted.map((c) => {
         const timesLabel = (c.scheduleTimes || []).map(formatTimeAMPM).filter(Boolean).join(', ') || '—';
         const releaseLabel = c.releaseDate ? `Release: ${formatReleaseDate(c.releaseDate)}` : '';
-        const campAvatar = `<div class="list-card-avatar campaign-avatar campaign-avatar-square"><img src="${campaignAvatarUrl(c.id)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(c.name || 'C').charAt(0).toUpperCase()}</span></div>`;
+        const displayName = campaignDisplayTitle(project, c);
+        const campAvatar = `<div class="list-card-avatar campaign-avatar campaign-avatar-square"><img src="${campaignAvatarUrl(c.id)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(displayName || 'C').charAt(0).toUpperCase()}</span></div>`;
         return `
         <div class="list-card" data-campaign-id="${c.id}">
           ${campAvatar}
           <div class="list-card-main">
-            <a href="#/campaign/${project.id}/${c.id}" class="list-card-title">${escapeHtml(c.name)}</a>
+            <a href="#/campaign/${project.id}/${c.id}" class="list-card-title">${escapeHtml(displayName)}</a>
             <span class="list-card-meta">
               ${c.deployed ? '<span class="badge badge-deployed">Deployed</span>' : '<span class="badge badge-draft">Draft</span>'}
               ${releaseLabel ? escapeHtml(releaseLabel) + ' · ' : ''}${escapeHtml(timesLabel)}
@@ -1045,10 +1056,17 @@ function renderProject(projectId) {
     const uploadPostsBtn = document.getElementById('uploadPostsBtn');
     if (uploadPostsBtn) {
       uploadPostsBtn.onclick = () => {
-        apiCreateCampaign(project.id, 'Recurring posts').then((campaign) => {
-          location.hash = `#/campaign/${project.id}/${campaign.id}`;
+        // Reuse this page's single "page content" campaign so we don't start a new campaign—content lives only in this page profile.
+        const pageContentCampaign = campaigns.find((c) => c.name === 'Recurring posts');
+        if (pageContentCampaign) {
+          location.hash = `#/campaign/${project.id}/${pageContentCampaign.id}`;
           render();
-        }).catch((err) => showAlert(err.message || 'Failed to create'));
+        } else {
+          apiCreateCampaign(project.id, 'Recurring posts').then((campaign) => {
+            location.hash = `#/campaign/${project.id}/${campaign.id}`;
+            render();
+          }).catch((err) => showAlert(err.message || 'Failed to create'));
+        }
       };
     }
     document.getElementById('joinCampaignBtn').onclick = () => {
@@ -1924,13 +1942,16 @@ function renderCampaign(projectId, campaignId, postTypeId) {
       textButtons.push(`<a href="#/campaign/${pid}/${cid}/pt/${encodeURIComponent(ptId)}/folder/${i}" class="btn btn-secondary btn-folder-text">Folder ${i} – edit on-screen text</a>`);
     }
 
+    const title = campaignDisplayTitle(project, campaign);
+    const backTo = isRecurringContentCampaign(project, campaign) ? `#/project/${pid}` : `#/campaign/${pid}/${cid}`;
+    const backLabel = isRecurringContentCampaign(project, campaign) ? `← Back to ${escapeHtml(project.name)}` : '← Back to post types';
     const campaignAvatarSection = `<div class="campaign-header-avatar-inner" id="campaignHeaderAvatarInner"><img src="${campaignAvatarUrl(cid)}" alt="" class="campaign-avatar-img" id="campaignAvatarImg" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" id="campaignAvatarPlaceholder" style="display:none;">${(campaign.name || 'C').charAt(0).toUpperCase()}</span></div><input type="file" accept="image/*" id="campaignAvatarInput" hidden />`;
     const pageIndicator = project.hasAvatar
       ? `<img src="${projectAvatarUrl(project.id)}" alt="" class="page-indicator-avatar" />`
       : `<span class="page-indicator-initial">${(project.name || 'P').charAt(0).toUpperCase()}</span>`;
     main.innerHTML = `
       <section class="card campaign-section campaign-page-card">
-        <p class="back-link-wrap"><a href="#/campaign/${pid}/${cid}" class="nav-link">← Back to post types</a></p>
+        <p class="back-link-wrap"><a href="${backTo}" class="nav-link">${backLabel}</a></p>
         <div class="campaign-page-header">
           <div class="campaign-page-header-spacer"></div>
           <div class="campaign-page-header-center">
@@ -1941,7 +1962,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
               </div>
             </div>
             <div class="campaign-page-title-wrap">
-              <h1 id="campaignName" class="campaign-detail-name-editable" title="Double-click to rename">${escapeHtml(campaign.name)}</h1>
+              <h1 id="campaignName" class="campaign-detail-name-editable" title="Double-click to rename">${escapeHtml(title)}</h1>
               <h2 id="postTypeHeader" class="post-type-header-editable post-type-name-centered" title="Double-click to edit label">${escapeHtml((campaign.postTypes || []).find((p) => p.id === ptId)?.name || ptId)}</h2>
               <label class="deploy-toggle deploy-toggle-under-name">
                 <input type="checkbox" id="deployed" ${isPostTypeDeployed(campaign, pid, ptId) ? 'checked' : ''} />
