@@ -1194,10 +1194,11 @@ function renderProjectUsed(projectId) {
 
 function renderMediaTypeSelector(pid, cid, ptId, project, campaign) {
   const main = document.getElementById('main');
+  const title = campaignDisplayTitle(project, campaign);
   main.innerHTML = `
     <section class="card campaign-section">
       <p class="back-link-wrap"><a href="#/campaign/${pid}/${cid}" class="nav-link">← Back to post types</a></p>
-      <h1>${escapeHtml(campaign.name)}</h1>
+      <h1>${escapeHtml(title)}</h1>
       <p class="hint" style="margin-bottom:20px;">Select whether this post type will use photos or videos.</p>
       <div class="media-type-selector">
         <label class="field"><span>Media type</span>
@@ -1739,13 +1740,17 @@ function renderPostTypeSelector(pid, cid, project, campaign) {
   const postTypes = campaign.postTypes || [];
   const main = document.getElementById('main');
   const hasPostTypes = postTypes.length > 0;
-  const campaignAvatarSection = `<div class="campaign-header-avatar-inner"><img src="${campaignAvatarUrl(cid)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(campaign.name || 'C').charAt(0).toUpperCase()}</span></div>`;
+  const isPageContent = isRecurringContentCampaign(project, campaign);
+  const backLink = isPageContent ? `#/project/${pid}` : `#/campaigns/${cid}`;
+  const backLabel = isPageContent ? `← Back to ${escapeHtml(project.name)}` : '← Back to campaign';
+  const title = campaignDisplayTitle(project, campaign);
+  const campaignAvatarSection = `<div class="campaign-header-avatar-inner"><img src="${campaignAvatarUrl(cid)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(title || 'C').charAt(0).toUpperCase()}</span></div>`;
   const pageIndicator = project.hasAvatar
     ? `<img src="${projectAvatarUrl(project.id)}" alt="" class="page-indicator-avatar" />`
     : `<span class="page-indicator-initial">${(project.name || 'P').charAt(0).toUpperCase()}</span>`;
   main.innerHTML = `
     <section class="card campaign-section campaign-page-card">
-      <p class="back-link-wrap back-link-wrap-centered"><a href="#/campaigns/${cid}" class="nav-link">← Back to campaign</a></p>
+      <p class="back-link-wrap back-link-wrap-centered"><a href="${backLink}" class="nav-link">${backLabel}</a></p>
       <div class="campaign-page-header">
         <div class="campaign-page-header-spacer"></div>
         <div class="campaign-page-header-center">
@@ -1756,16 +1761,16 @@ function renderPostTypeSelector(pid, cid, project, campaign) {
             </div>
           </div>
           <div class="campaign-page-title-wrap">
-            <h1 class="campaign-detail-name-editable">${escapeHtml(campaign.name)}</h1>
+            <h1 class="campaign-detail-name-editable">${escapeHtml(title)}</h1>
           </div>
-          <p class="hint" style="margin:8px 0 0 0;">${escapeHtml(project.name)} — Select a post type to configure folders, text, schedule, and run.</p>
+          <p class="hint" style="margin:8px 0 0 0;">${escapeHtml(project.name)} — Select a post type to upload content, set schedule, and run. No campaign required.</p>
         </div>
         <div class="campaign-page-header-right"></div>
       </div>
     </section>
     <section class="card">
       <h2>Post types</h2>
-      <p class="hint" style="margin-bottom:20px;">${hasPostTypes ? 'Each post type has its own photo folders, on-screen text (per folder), text styling (per folder), schedule, run now, and webContentUrls.' : 'Add a post type to get started. Each can have different folders and schedules.'}</p>
+      <p class="hint" style="margin-bottom:20px;">${hasPostTypes ? 'Each post type has its own folders, on-screen text (per folder), text styling, schedule, and run. Content stays in this page profile.' : 'Add a post type to upload content for this page. Each can have different folders and schedules.'}</p>
       <div class="post-type-selector post-type-big-buttons">
         ${postTypes.map((pt) => `
           <div class="post-type-card-wrap">
