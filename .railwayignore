@@ -4,3 +4,11 @@ node_modules
 .DS_Store
 uploads
 generated
+data
+.env
+dist
+build
+.next
+.cache
+coverage
+.vscode
