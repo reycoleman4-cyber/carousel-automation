@@ -26,6 +26,7 @@ const CONFIG_PATH = path.join(DATA, 'config.json');
 const LOGINS_PATH = path.join(DATA, 'logins.json');
 const RUNS_DIR = path.join(DATA, 'runs');
 const TEXT_USAGE_DIR = path.join(DATA, 'text-usage');
+const IMAGE_USAGE_DIR = path.join(DATA, 'image-usage');
 const AVATARS_DIR = path.join(DATA, 'avatars');
 const CAMPAIGN_AVATARS_DIR = path.join(DATA, 'campaign-avatars');
 const LOGIN_AVATARS_DIR = path.join(DATA, 'login-avatars');
@@ -74,6 +75,7 @@ function ensureDataDir() {
   if (!fsSync.existsSync(DATA)) fsSync.mkdirSync(DATA, { recursive: true });
   if (!fsSync.existsSync(RUNS_DIR)) fsSync.mkdirSync(RUNS_DIR, { recursive: true });
   if (!fsSync.existsSync(TEXT_USAGE_DIR)) fsSync.mkdirSync(TEXT_USAGE_DIR, { recursive: true });
+  if (!fsSync.existsSync(IMAGE_USAGE_DIR)) fsSync.mkdirSync(IMAGE_USAGE_DIR, { recursive: true });
   if (!fsSync.existsSync(AVATARS_DIR)) fsSync.mkdirSync(AVATARS_DIR, { recursive: true });
   if (!fsSync.existsSync(CAMPAIGN_AVATARS_DIR)) fsSync.mkdirSync(CAMPAIGN_AVATARS_DIR, { recursive: true });
   if (!fsSync.existsSync(LOGIN_AVATARS_DIR)) fsSync.mkdirSync(LOGIN_AVATARS_DIR, { recursive: true });
@@ -132,7 +134,8 @@ function writeJson(filePath, data) {
 }
 
 function getConfig() {
-  return readJson(CONFIG_PATH, { baseUrl: `http://localhost:${PORT}` });
+  const defaultBaseUrl = process.env.BASE_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${PORT}`);
+  return readJson(CONFIG_PATH, { baseUrl: defaultBaseUrl });
 }
 
 function normalizeBaseUrl(baseUrl) {
@@ -140,6 +143,20 @@ function normalizeBaseUrl(baseUrl) {
   if (!s) return '';
   if (/^https?:\/\//i.test(s)) return s;
   return `https://${s}`;
+}
+
+/** Base URL for generated/webContentUrls. Prefers Railway public URL over localhost so Blotato can fetch media. */
+function getBaseUrlForGenerated(req = null) {
+  const config = getConfig();
+  let url = normalizeBaseUrl(config.baseUrl);
+  if (!url || /localhost|127\.0\.0\.1/i.test(url)) {
+    url = normalizeBaseUrl(process.env.BASE_URL) || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null);
+  }
+  if (!url && req && req.get('host')) {
+    const proto = (req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+    url = `${proto}://${req.get('host')}`;
+  }
+  return url || `http://localhost:${PORT}`;
 }
 
 function setConfig(config) {
@@ -471,6 +488,45 @@ function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+/** Path for image usage counts per folder: { "filename": count }. */
+function imageUsagePath(userId, projectId, campaignId, postTypeId, folderNum) {
+  const safe = (s) => String(s).replace(/[/\\]/g, '_');
+  return path.join(IMAGE_USAGE_DIR, `${safe(userId)}_${safe(projectId)}_${safe(campaignId)}_${safe(postTypeId)}_folder${folderNum}.json`);
+}
+
+async function readImageUsage(userId, projectId, campaignId, postTypeId, folderNum) {
+  const p = imageUsagePath(userId, projectId, campaignId, postTypeId, folderNum);
+  try {
+    const raw = await fs.readFile(p, 'utf8');
+    const data = JSON.parse(raw);
+    return typeof data === 'object' && data !== null ? data : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+async function incrementImageUsage(userId, projectId, campaignId, postTypeId, folderNum, filename) {
+  ensureDataDir();
+  const usage = await readImageUsage(userId, projectId, campaignId, postTypeId, folderNum);
+  const key = String(filename);
+  usage[key] = (usage[key] || 0) + 1;
+  const p = imageUsagePath(userId, projectId, campaignId, postTypeId, folderNum);
+  await fs.writeFile(p, JSON.stringify(usage), 'utf8');
+}
+
+/** Pick image with lowest usage count (tie-break random). Does not increment. */
+function pickLeastUsedImage(images, getUsage) {
+  if (!images || images.length === 0) return null;
+  const usage = getUsage();
+  const withCount = images.map((img) => {
+    const name = img.filename || (img.path && path.basename(img.path));
+    return { img, count: usage[name] || 0 };
+  });
+  const minCount = Math.min(...withCount.map((x) => x.count));
+  const leastUsed = withCount.filter((x) => x.count === minCount);
+  return leastUsed[Math.floor(Math.random() * leastUsed.length)].img;
+}
+
 /** Path for persisting text-option usage counts per campaign/postType (folder index -> array of counts). */
 function textUsagePath(projectId, campaignId, postTypeId) {
   const safe = (s) => String(s).replace(/[/\\]/g, '_');
@@ -653,8 +709,7 @@ async function runCampaignPipelineVideo(userId, projectId, campaignId, postTypeI
   const folderCount = 2;
   await ensureDirs(userId, projectIdStr, campaignIdStr, folderCount, pt.id);
   const folders = campaignDirs(userId, projectIdStr, campaignIdStr, folderCount, pt.id);
-  const config = getConfig();
-  const baseUrl = normalizeBaseUrl(config.baseUrl);
+  const baseUrl = getBaseUrlForGenerated();
   const priorityVideos = await listVideos(folders[0]);
   const fallbackVideos = await listVideos(folders[1]);
   const chosen = priorityVideos.length ? pickRandom(priorityVideos) : (fallbackVideos.length ? pickRandom(fallbackVideos) : null);
@@ -846,16 +901,15 @@ async function runCampaignPipelineVideoWithText(userId, projectId, campaignId, t
     const outName = `video-${runId}.mp4`;
     const outPath = path.join(outDir, outName);
     await addVideoTextOverlay(inputPath, text, textStyle, outPath, { preview: opts.preview === true });
-    const config = getConfig();
-    const baseUrl = normalizeBaseUrl(config.baseUrl);
+    const baseUrl = getBaseUrlForGenerated();
+    const uidSeg = String(userId).replace(/[/\\]/g, '_');
     let url;
     if (storage.useSupabase()) {
       const outBuf = await fs.readFile(outPath);
       await storage.uploadGenerated(projectIdStr, campaignIdStr, outName, outBuf, 'video/mp4', userId);
-      url = storage.getGeneratedUrl(projectIdStr, campaignIdStr, outName, userId);
       await fs.unlink(outPath).catch(() => {});
+      url = `${baseUrl}/generated/${uidSeg}/${projectIdStr}/${campaignIdStr}/${outName}`;
     } else {
-      const uidSeg = String(userId).replace(/[/\\]/g, '_');
       url = `${baseUrl}/generated/${uidSeg}/${projectIdStr}/${campaignIdStr}/${outName}`;
     }
     if (!url) throw new Error('Could not get output URL');
@@ -902,8 +956,7 @@ async function runCampaignPipeline(userId, projectId, campaignId, textStyleOverr
     ? [...textStyleOverride]
     : [...(pt.textStylePerFolder || campaign.textStylePerFolder || [])];
   while (textStylePerFolder.length < folderCount) textStylePerFolder.push({});
-  const config = getConfig();
-  const baseUrl = normalizeBaseUrl(config.baseUrl);
+  const baseUrl = getBaseUrlForGenerated();
   const webContentUrls = [];
   const webContentBase64 = [];
   const usedSourcePaths = [];
@@ -912,7 +965,8 @@ async function runCampaignPipeline(userId, projectId, campaignId, textStyleOverr
   const useFirstImage = !!textStyleOverride;
   for (let i = 0; i < folderCount; i++) {
     const images = await listImages(folders[i]);
-    const chosen = useFirstImage && images.length ? images[0] : pickRandom(images);
+    const usage = await readImageUsage(userId, projectIdStr, campaignIdStr, pt.id, i + 1);
+    const chosen = useFirstImage && images.length ? images[0] : pickLeastUsedImage(images, () => usage);
     if (!chosen) continue;
     usedSourcePaths.push({ item: chosen, folderNum: i + 1, postTypeId: pt.id });
     const opts = textOptionsPerFolder[i];
@@ -924,14 +978,16 @@ async function runCampaignPipeline(userId, projectId, campaignId, textStyleOverr
     const outPath = path.join(outDir, outName);
     const imgBuf = await getImageBuffer(chosen, i, folders, projectIdStr, campaignIdStr, pt.id, userId);
     const buf = await addTextOverlay(imgBuf, text, outPath, folderStyle);
+    const uidSeg = String(userId).replace(/[/\\]/g, '_');
     if (storage.useSupabase()) {
-      const url = await storage.uploadGenerated(projectIdStr, campaignIdStr, outName, buf, undefined, userId);
-      webContentUrls.push(url);
+      await storage.uploadGenerated(projectIdStr, campaignIdStr, outName, buf, undefined, userId);
+      webContentUrls.push(`${baseUrl}/generated/${uidSeg}/${projectIdStr}/${campaignIdStr}/${outName}`);
     } else {
-      const uidSeg = String(userId).replace(/[/\\]/g, '_');
       webContentUrls.push(`${baseUrl}/generated/${uidSeg}/${projectIdStr}/${campaignIdStr}/${outName}`);
     }
     webContentBase64.push(buf.toString('base64'));
+    const chosenFilename = chosen.filename || (chosen.path && path.basename(chosen.path));
+    if (chosenFilename && !useFirstImage) await incrementImageUsage(userId, projectIdStr, campaignIdStr, pt.id, i + 1, chosenFilename);
   }
 
   const runData = { campaignId: campaignIdStr, runId, webContentUrls, webContentBase64, usedSourcePaths, at: new Date().toISOString() };
@@ -954,8 +1010,7 @@ async function runTrendPipeline(userId, trendId, textStyleOverride, textOptionsO
   const folderCount = Math.max(1, parseInt(trend.folderCount, 10) || 1);
   const outDir = generatedDirForTrend(userId, trendId);
   await fs.mkdir(outDir, { recursive: true });
-  const config = getConfig();
-  const baseUrl = normalizeBaseUrl(config.baseUrl);
+  const baseUrl = getBaseUrlForGenerated();
   const uidSeg = String(userId).replace(/[/\\]/g, '_');
   const webContentUrls = [];
   const runId = Date.now();
@@ -1065,6 +1120,24 @@ const upload = multer({
       const ok = /^image\/(jpeg|png|webp|gif)$/i.test(file.mimetype);
       cb(null, !!ok);
     }
+  },
+});
+
+const trendUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      fsSync.mkdirSync(uploadTempDir, { recursive: true });
+      cb(null, uploadTempDir);
+    },
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname) || '.jpg';
+      cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
+    },
+  }),
+  limits: { fileSize: 100 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ok = /^image\/(jpeg|png|webp|gif)$/i.test(file.mimetype);
+    cb(null, !!ok);
   },
 });
 
@@ -1464,11 +1537,7 @@ api.post('/projects/:projectId/campaigns/:campaignId/postTypes', (req, res) => {
   const mediaType = req.body.mediaType === 'video_text' ? 'video_text' : (req.body.mediaType === 'video' ? 'video' : 'photo');
   const id = nextPostTypeIdForPage(campaign, projectId);
   const folderCount = mediaType === 'video' ? 2 : (mediaType === 'video_text' ? 1 : 3);
-  const textOptionsPerFolder = mediaType === 'video'
-    ? [[...DEFAULT_TEXT_OPTIONS], [...DEFAULT_TEXT_OPTIONS]]
-    : mediaType === 'video_text'
-      ? [[...DEFAULT_TEXT_OPTIONS]]
-      : [[...DEFAULT_TEXT_OPTIONS], [...DEFAULT_TEXT_OPTIONS], [...DEFAULT_TEXT_OPTIONS]];
+  const textOptionsPerFolder = Array(folderCount).fill(null).map(() => []);
   const newPt = {
     id,
     name,
@@ -1514,7 +1583,7 @@ api.put('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId', (req
     updatedPt = {
       ...updatedPt,
       folderCount: 2,
-      textOptionsPerFolder: [[...DEFAULT_TEXT_OPTIONS], [...DEFAULT_TEXT_OPTIONS]],
+      textOptionsPerFolder: [[], []],
       textStylePerFolder: [],
     };
     ensureDirs(uid, String(projectId), String(campaignId), 2, pt.id);
@@ -1523,7 +1592,7 @@ api.put('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId', (req
     updatedPt = {
       ...updatedPt,
       folderCount: 1,
-      textOptionsPerFolder: Array.isArray(pt.textOptionsPerFolder) && pt.textOptionsPerFolder.length ? [pt.textOptionsPerFolder[0]] : [[...DEFAULT_TEXT_OPTIONS]],
+      textOptionsPerFolder: Array.isArray(pt.textOptionsPerFolder) && pt.textOptionsPerFolder.length ? [pt.textOptionsPerFolder[0]] : [[]],
       textStylePerFolder: Array.isArray(pt.textStylePerFolder) && pt.textStylePerFolder.length ? [pt.textStylePerFolder[0]] : [{}],
     };
     ensureDirs(uid, String(projectId), String(campaignId), 1, pt.id);
@@ -1818,7 +1887,16 @@ api.get('/projects/:projectId/campaigns/:campaignId/folders', async (req, res) =
     const result = {};
     const listFn = isVideo ? listVideos : listImages;
     for (let i = 0; i < folderCount; i++) {
-      result[`folder${i + 1}`] = (await listFn(dirs[i])).map((f) => (f && f.filename) ? f.filename : path.basename(f && f.path ? f.path : f));
+      const files = await listFn(dirs[i]);
+      if (isVideo) {
+        result[`folder${i + 1}`] = files.map((f) => (f && f.filename) ? f.filename : path.basename(f && f.path ? f.path : f));
+      } else {
+        const usage = await readImageUsage(uid, projectId, campaignId, postTypeId, i + 1);
+        result[`folder${i + 1}`] = files.map((f) => {
+          const name = (f && f.filename) ? f.filename : path.basename(f && f.path ? f.path : f);
+          return { filename: name, usageCount: usage[name] || 0 };
+        });
+      }
     }
     res.json({ folders: result, folderCount, mediaType: (pt && pt.mediaType) || (isVideo ? 'video' : 'photo') });
   } catch (e) {
@@ -1841,7 +1919,7 @@ api.post('/projects/:projectId/campaigns/:campaignId/folders', async (req, res) 
     if (pt.mediaType === 'video_text') return res.status(400).json({ error: 'Videos (add text) post types have a single folder' });
     const newCount = Math.max(1, (pt.folderCount || 3) + 1);
     const textOptionsPerFolder = Array.isArray(pt.textOptionsPerFolder) ? [...pt.textOptionsPerFolder] : [];
-    while (textOptionsPerFolder.length < newCount) textOptionsPerFolder.push([...DEFAULT_TEXT_OPTIONS]);
+    while (textOptionsPerFolder.length < newCount) textOptionsPerFolder.push([]);
     const textStylePerFolder = Array.isArray(pt.textStylePerFolder) ? [...pt.textStylePerFolder] : [];
     while (textStylePerFolder.length < newCount) textStylePerFolder.push({});
     const pagePostTypes = { ...(campaign.pagePostTypes || {}) };
@@ -2266,17 +2344,12 @@ api.post('/projects/:projectId/campaigns/:campaignId/preview', async (req, res) 
       strokeWidth: textStyle.strokeWidth != null ? parseFloat(textStyle.strokeWidth) : 2,
     };
     const imageBuffer = await addTextOverlay(imgBuf, sampleText, outPath, normStyle);
+    const baseUrl = getBaseUrlForGenerated(req);
     let url;
     if (storage.useSupabase()) {
-      url = await storage.uploadGenerated(projectId, campaignId, outName, imageBuffer, undefined, uid);
+      await storage.uploadGenerated(projectId, campaignId, outName, imageBuffer, undefined, uid);
+      url = `${baseUrl}/generated/${uidSeg}/${projectId}/${campaignId}/${outName}`;
     } else {
-      const config = getConfig();
-      let baseUrl = normalizeBaseUrl(config.baseUrl);
-      if (!baseUrl && req && req.get('host')) {
-        const proto = (req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
-        baseUrl = `${proto}://${req.get('host')}`;
-      }
-      const uidSeg = String(uid).replace(/[/\\]/g, '_');
       url = `${baseUrl}/generated/${uidSeg}/${projectId}/${campaignId}/${outName}`;
     }
     res.json({ url, base64: imageBuffer.toString('base64') });
@@ -2292,6 +2365,24 @@ api.post('/projects/:projectId/campaigns/:campaignId/run', async (req, res) => {
     const projectId = req.params.projectId;
     const campaignId = req.params.campaignId;
     const postTypeId = req.body?.postTypeId || 'default';
+    const campaign = getCampaignById(campaignId, uid);
+    if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
+    const todayStr = new Date().toISOString().slice(0, 10);
+    if (campaign.campaignStartDate && todayStr < campaign.campaignStartDate) {
+      return res.status(400).json({ error: 'Campaign has not started yet. Deployment is only allowed within the campaign date window.', campaignStartDate: campaign.campaignStartDate });
+    }
+    if (campaign.campaignEndDate && todayStr > campaign.campaignEndDate) {
+      return res.status(400).json({ error: 'Campaign has ended. Deployment is only allowed within the campaign date window.', campaignEndDate: campaign.campaignEndDate });
+    }
+    const pt = getPostType(campaign, postTypeId, projectId);
+    if (pt) {
+      if (pt.scheduleStartDate && todayStr < pt.scheduleStartDate) {
+        return res.status(400).json({ error: 'This post type\'s schedule has not started yet.', scheduleStartDate: pt.scheduleStartDate });
+      }
+      if (pt.scheduleEndDate && todayStr > pt.scheduleEndDate) {
+        return res.status(400).json({ error: 'This post type\'s schedule has ended.', scheduleEndDate: pt.scheduleEndDate });
+      }
+    }
     const textStyleOverride = Array.isArray(req.body?.textStylePerFolder) ? req.body.textStylePerFolder : null;
     const textOptionsOverride = Array.isArray(req.body?.textOptionsPerFolder) ? req.body.textOptionsPerFolder : null;
     const sendAsDraft = req.body?.sendAsDraft === true;
@@ -2309,20 +2400,7 @@ api.post('/projects/:projectId/campaigns/:campaignId/run', async (req, res) => {
         result.blotatoError = String(blotatoErr.message);
       }
     }
-    for (const used of result.usedSourcePaths || []) {
-      try {
-        const { item, folderNum, postTypeId } = used;
-        if (storage.useSupabase()) {
-          await storage.moveToUsed(projectId, campaignId, { filename: item.filename, postTypeId }, folderNum, uid);
-          console.log(`[run] Moved used image to used folder: ${item.filename}`);
-        } else if (item.path && fsSync.existsSync(item.path)) {
-          await moveToUsedFolder(uid, projectId, campaignId, item.path, folderNum);
-          console.log(`[run] Moved used image to used folder: ${path.basename(item.path)}`);
-        }
-      } catch (moveErr) {
-        console.warn(`[run] Failed to move used image:`, moveErr.message);
-      }
-    }
+    // Photos stay in folders; we track usage via image-usage counts and pick least-used next time.
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: String(e.message) });
@@ -2362,8 +2440,8 @@ api.get('/trends', (req, res) => {
   const uid = requireUserId(req, res);
   if (!uid) return;
   let items = getAllTrends(uid);
-  const campaignId = req.query.campaignId != null ? String(req.query.campaignId) : null;
-  if (campaignId) items = items.filter((t) => String(t.campaignId) === campaignId);
+  const campaignId = req.query.campaignId != null ? String(req.query.campaignId).trim() : null;
+  if (campaignId) items = items.filter((t) => t.campaignId != null && String(t.campaignId).trim() === campaignId);
   res.json(items);
 });
 
@@ -2392,7 +2470,7 @@ api.post('/trends', async (req, res) => {
       textOptions: [...DEFAULT_TEXT_OPTIONS],
       textStyle: {},
       pageSchedules: {},
-      campaignId: campaignId || undefined,
+      campaignId: (campaignId != null && campaignId !== '') ? String(campaignId) : null,
       createdAt: new Date().toISOString(),
     };
     saveTrend(trend, uid);
@@ -2429,7 +2507,7 @@ api.put('/trends/:trendId', async (req, res) => {
     const textStyle = req.body.textStyle && typeof req.body.textStyle === 'object' ? req.body.textStyle : trend.textStyle;
     const pageSchedules = req.body.pageSchedules && typeof req.body.pageSchedules === 'object' ? req.body.pageSchedules : trend.pageSchedules;
     const folderCount = req.body.folderCount !== undefined ? Math.max(1, parseInt(req.body.folderCount, 10) || 3) : (trend.folderCount != null ? Math.max(1, parseInt(trend.folderCount, 10) || 3) : 1);
-    const campaignId = req.body.campaignId !== undefined ? (req.body.campaignId != null ? String(req.body.campaignId) : undefined) : trend.campaignId;
+    const campaignId = req.body.campaignId !== undefined ? (req.body.campaignId != null && req.body.campaignId !== '' ? String(req.body.campaignId) : null) : trend.campaignId;
     const updated = { ...trend, name, pageIds, textOptions, textStyle, pageSchedules, folderCount, campaignId };
     saveTrend(updated, uid);
     await ensureTrendDirs(uid, trendId, updated.pageIds, updated.folderCount);
@@ -2512,7 +2590,35 @@ api.get('/trends/:trendId/pages/:pageIndex/folders/:folderNum/images', async (re
   }
 });
 
-api.post('/trends/:trendId/pages/:pageIndex/folders/:folderNum/upload', upload.array('photo', 100), async (req, res) => {
+api.get('/trends/:trendId/pages/:pageIndex/folders/:folderNum/images/:filename', (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  const trendId = String(req.params.trendId);
+  const pageIndex = Math.max(1, Math.min(999, parseInt(req.params.pageIndex, 10)));
+  const folderNum = Math.max(1, Math.min(999, parseInt(req.params.folderNum, 10)));
+  const filename = req.params.filename;
+  if (!filename || /[\/\\]/.test(filename)) return res.status(400).end();
+  const trend = getTrendById(trendId, uid);
+  if (!trend) return res.status(404).end();
+  const pageIds = trend.pageIds && trend.pageIds.length ? trend.pageIds : [];
+  if (pageIndex > pageIds.length) return res.status(404).end();
+  const folderCount = Math.max(1, parseInt(trend.folderCount, 10) || 3);
+  if (folderNum > folderCount) return res.status(404).end();
+  const dirs = trendPageFolderDirs(uid, trendId, pageIndex, folderCount);
+  const filePath = path.join(dirs[folderNum - 1], filename);
+  if (!path.resolve(filePath).startsWith(path.resolve(TRENDS_DIR))) return res.status(403).end();
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.sendFile(path.resolve(filePath), (err) => { if (err && err.statusCode) res.status(err.statusCode).end(); });
+});
+
+api.post('/trends/:trendId/pages/:pageIndex/folders/:folderNum/upload', (req, res, next) => {
+  trendUpload.array('photo', 100)(req, res, (err) => {
+    if (err) {
+      return res.status(400).json({ error: err.message || 'Upload failed' });
+    }
+    next();
+  });
+}, async (req, res) => {
   const uid = requireUserId(req, res);
   if (!uid) return;
   try {
@@ -2605,12 +2711,7 @@ api.post('/trends/:trendId/preview', async (req, res) => {
     const outName = `preview-${pageIndex}-${folderNum}-${Date.now()}.jpg`;
     const outPath = path.join(outDir, outName);
     await addTextOverlay(imgBuf, sampleText, outPath, normStyle);
-    const config = getConfig();
-    let baseUrl = normalizeBaseUrl(config.baseUrl);
-    if (!baseUrl && req && req.get('host')) {
-      const proto = (req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
-      baseUrl = `${proto}://${req.get('host')}`;
-    }
+    const baseUrl = getBaseUrlForGenerated(req);
     const url = `${baseUrl}/generated/${uidSeg}/trends/${trendId}/${outName}`;
     res.json({ url });
   } catch (e) {
@@ -2623,6 +2724,20 @@ api.post('/trends/:trendId/run', async (req, res) => {
   if (!uid) return;
   try {
     const trendId = parseInt(req.params.trendId, 10);
+    const trend = getTrendById(trendId, uid);
+    if (!trend) return res.status(404).json({ error: 'Trend not found' });
+    if (trend.campaignId) {
+      const campaign = getCampaignById(trend.campaignId, uid);
+      if (campaign) {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        if (campaign.campaignStartDate && todayStr < campaign.campaignStartDate) {
+          return res.status(400).json({ error: 'This trend is linked to a campaign that has not started yet. Posting is only allowed within the campaign date window.', campaignStartDate: campaign.campaignStartDate });
+        }
+        if (campaign.campaignEndDate && todayStr > campaign.campaignEndDate) {
+          return res.status(400).json({ error: 'This trend is linked to a campaign that has ended. Posting is only allowed within the campaign date window.', campaignEndDate: campaign.campaignEndDate });
+        }
+      }
+    }
     const textStyleOverride = req.body.textStyle && typeof req.body.textStyle === 'object' ? req.body.textStyle : null;
     const textOptionsOverride = Array.isArray(req.body.textOptions) && req.body.textOptions.length ? req.body.textOptions : null;
     const result = await runTrendPipeline(uid, trendId, textStyleOverride, textOptionsOverride);
@@ -2860,12 +2975,20 @@ api.post('/logins/:id/avatar', (req, res, next) => {
 });
 
 // --- Serve generated images: /generated/:userId/:projectId/:campaignId/:filename (per-profile) ---
-function serveGeneratedImage(req, res) {
+async function serveGeneratedImage(req, res) {
   const { userId, projectId, campaignId, filename } = req.params;
   if (!filename || /[\/\\]/.test(filename)) return res.status(400).end();
   if (storage.useSupabase()) {
-    const url = storage.getGeneratedUrl(projectId, campaignId, filename, userId);
-    if (url) return res.redirect(302, url);
+    try {
+      const buffer = await storage.readGeneratedBuffer(projectId, campaignId, filename, userId || undefined);
+      const contentType = filename.toLowerCase().endsWith('.mp4') ? 'video/mp4' : 'image/jpeg';
+      res.set('Cache-Control', 'public, max-age=86400');
+      res.set('Content-Type', contentType);
+      res.send(buffer);
+    } catch (e) {
+      res.status(404).end();
+    }
+    return;
   }
   const uidSeg = userId ? String(userId).replace(/[/\\]/g, '_') : '';
   const filePath = uidSeg
@@ -2958,6 +3081,8 @@ cron.schedule('* * * * *', async () => {
         for (const pt of postTypes) {
           if (!isPostTypeDeployed(c, projectId, pt.id)) continue;
           if (!pt.scheduleEnabled || !(pt.scheduleTimes || []).includes(currentTime)) continue;
+          if (c.campaignStartDate && todayStr < c.campaignStartDate) continue;
+          if (c.campaignEndDate && todayStr > c.campaignEndDate) continue;
           if (pt.scheduleStartDate && todayStr < pt.scheduleStartDate) continue;
           if (pt.scheduleEndDate && todayStr > pt.scheduleEndDate) continue;
           const days = pt.scheduleDaysOfWeek ?? [0, 1, 2, 3, 4, 5, 6];
@@ -2981,20 +3106,6 @@ cron.schedule('* * * * *', async () => {
       if (apiKey && accountId && result.webContentUrls?.length) {
         await sendToBlotato(apiKey, accountId, result.webContentUrls, { isDraft: c.sendAsDraft });
         console.log(`[scheduler] Blotato post sent for ${c.name} page ${projectId}`);
-        for (const used of result.usedSourcePaths || []) {
-          try {
-            const { item, folderNum, postTypeId } = used;
-            if (storage.useSupabase()) {
-              await storage.moveToUsed(projectId, c.id, { filename: item.filename, postTypeId }, folderNum, uid);
-              console.log(`[scheduler] Moved used image to used folder: ${item.filename}`);
-            } else if (item.path && fsSync.existsSync(item.path)) {
-              await moveToUsedFolder(uid, projectId, c.id, item.path, folderNum);
-              console.log(`[scheduler] Moved used image to used folder: ${path.basename(item.path)}`);
-            }
-          } catch (moveErr) {
-            console.warn(`[scheduler] Failed to move used image:`, moveErr.message);
-          }
-        }
       }
     } catch (e) {
       console.error(`[scheduler] ${c.name} page ${projectId}:`, e.message);

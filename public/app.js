@@ -474,7 +474,12 @@ function apiCreateTrend(name, pageIds, campaignId) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  }).then((r) => r.json());
+  }).then((r) => {
+    return r.json().then((data) => {
+      if (!r.ok) return Promise.reject(new Error(data && data.error ? data.error : 'Failed to create trend'));
+      return data;
+    });
+  });
 }
 function apiUpdateTrend(trendId, data) {
   return apiWithAuth(`${API}/api/trends/${trendId}`, {
@@ -503,7 +508,13 @@ function apiTrendPageFolderImages(trendId, pageIndex, folderNum) {
 function apiTrendPageFolderUpload(trendId, pageIndex, folderNum, files) {
   const form = new FormData();
   for (const f of files) form.append('photo', f);
-  return apiWithAuth(`${API}/api/trends/${trendId}/pages/${pageIndex}/folders/${folderNum}/upload`, { method: 'POST', body: form }).then((r) => r.json());
+  return apiWithAuth(`${API}/api/trends/${trendId}/pages/${pageIndex}/folders/${folderNum}/upload`, { method: 'POST', body: form }).then((r) => {
+    if (!r.ok) return r.json().then((d) => Promise.reject(new Error(d && d.error ? d.error : 'Upload failed')));
+    return r.json();
+  });
+}
+function trendFolderImageUrl(trendId, pageIndex, folderNum, filename) {
+  return `${API}/api/trends/${trendId}/pages/${pageIndex}/folders/${folderNum}/images/${encodeURIComponent(filename)}`;
 }
 function apiTrendPreview(trendId, pageIndex, folderNum, textStyle, textOptions) {
   return apiWithAuth(`${API}/api/trends/${trendId}/preview`, {
@@ -517,7 +528,11 @@ function apiTrendRun(trendId, textStyle, textOptions) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ textStyle: textStyle || null, textOptions: textOptions || null }),
-  }).then((r) => r.json());
+  }).then(async (r) => {
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || r.statusText || 'Run failed');
+    return data;
+  });
 }
 function apiTrendLatest(trendId) {
   return apiWithAuth(`${API}/api/trends/${trendId}/latest`).then((r) => r.json());
@@ -683,6 +698,10 @@ function updateNavActive() {
   }
 }
 
+/** When true, campaign/post-type views use project-based URLs (#/project/X/content/Y) and "Back to [page]". Set when resolving project content route. */
+let projectContentMode = false;
+let projectContentProjectId = null;
+
 function getRoute() {
   const hash = window.location.hash.slice(1) || '/';
   const parts = hash.split('/').filter(Boolean);
@@ -699,6 +718,17 @@ function getRoute() {
   }
   if (parts[0] === 'project' && parts[1]) {
     if (parts[2] === 'used') return { view: 'projectUsed', projectId: parts[1] };
+    if (parts[2] === 'content') {
+      const projectId = parts[1];
+      const postTypeId = parts[3] || null;
+      if (postTypeId) {
+        if (parts[4] === 'folder' && parts[5]) return { view: 'projectContentFolder', projectId, postTypeId, folderNum: parts[5] };
+        if (parts[4] === 'photos' && parts[5]) return { view: 'projectContentFolderPhotos', projectId, postTypeId, folderNum: parts[5] };
+        if (parts[4] === 'videos' && parts[5]) return { view: 'projectContentFolderVideos', projectId, postTypeId, folderNum: parts[5] };
+        return { view: 'projectContent', projectId, postTypeId };
+      }
+      return { view: 'projectContentList', projectId };
+    }
     return { view: 'project', projectId: parts[1] };
   }
   if (parts[0] === 'campaign' && parts[1] && parts[2]) {
@@ -739,6 +769,24 @@ function isRecurringContentCampaign(project, campaign) {
 /** Display title for a campaign; for recurring page content shows "Your content". */
 function campaignDisplayTitle(project, campaign) {
   return isRecurringContentCampaign(project, campaign) ? 'Your content' : (campaign.name || 'Campaign');
+}
+
+/** True when we're viewing this project's content via #/project/X/content/... (post type lives in page profile). */
+function isProjectContent(pid) {
+  return projectContentMode && projectContentProjectId != null && String(projectContentProjectId) === String(pid);
+}
+
+/** Link to post type or sub-route; uses project content URL when in project content mode. */
+function contentPostTypeLink(pid, cid, ptId, subPath) {
+  const enc = (id) => encodeURIComponent(id);
+  if (isProjectContent(pid)) return `#/project/${pid}/content/${enc(ptId)}${subPath ? '/' + subPath : ''}`;
+  return `#/campaign/${pid}/${cid}/pt/${enc(ptId)}${subPath ? '/' + subPath : ''}`;
+}
+
+/** Back link from post type list; to project or campaign list. */
+function contentBackLink(pid, cid) {
+  if (isProjectContent(pid)) return `#/project/${pid}`;
+  return `#/campaign/${pid}/${cid}`;
 }
 
 function getCampaignPostsPerWeek(campaign, deployedOnly) {
@@ -956,7 +1004,7 @@ function renderProject(projectId) {
         </div>
         <div class="campaign-list" id="campaignList"></div>
         <div class="actions" style="flex-wrap:wrap;gap:8px;">
-          ${(project.pageType || 'recurring') === 'recurring' ? '<button type="button" class="btn btn-primary" id="uploadPostsBtn">Upload posts</button>' : ''}
+          ${(project.pageType || 'recurring') === 'recurring' ? '<button type="button" class="btn btn-primary" id="createPostTypeBtn">Create post type</button>' : ''}
           <button type="button" class="btn ${(project.pageType || 'recurring') === 'recurring' ? 'btn-secondary' : 'btn-primary'}" id="joinCampaignBtn">Join campaign</button>
         </div>
       </section>
@@ -1022,7 +1070,7 @@ function renderProject(projectId) {
     const isRecurring = (project.pageType || 'recurring') === 'recurring';
     if (!campaigns.length) {
       list.innerHTML = isRecurring
-        ? '<p class="empty">Upload posts to add content and run on your own schedule—no campaign needed. Or join a campaign to post with other pages.</p>'
+        ? '<p class="empty">Create a post type to add content and run on your own schedule—no campaign needed. Or join a campaign to post with other pages.</p>'
         : '<p class="empty">No campaigns yet. Join a campaign to get started.</p>';
     } else {
       const sorted = [...campaigns].sort((a, b) => {
@@ -1038,11 +1086,12 @@ function renderProject(projectId) {
         const releaseLabel = c.releaseDate ? `Release: ${formatReleaseDate(c.releaseDate)}` : '';
         const displayName = campaignDisplayTitle(project, c);
         const campAvatar = `<div class="list-card-avatar campaign-avatar campaign-avatar-square"><img src="${campaignAvatarUrl(c.id)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(displayName || 'C').charAt(0).toUpperCase()}</span></div>`;
+        const contentHref = isRecurringContentCampaign(project, c) ? `#/project/${project.id}/content` : `#/campaign/${project.id}/${c.id}`;
         return `
         <div class="list-card" data-campaign-id="${c.id}">
           ${campAvatar}
           <div class="list-card-main">
-            <a href="#/campaign/${project.id}/${c.id}" class="list-card-title">${escapeHtml(displayName)}</a>
+            <a href="${contentHref}" class="list-card-title">${escapeHtml(displayName)}</a>
             <span class="list-card-meta">
               ${c.deployed ? '<span class="badge badge-deployed">Deployed</span>' : '<span class="badge badge-draft">Draft</span>'}
               ${releaseLabel ? escapeHtml(releaseLabel) + ' · ' : ''}${escapeHtml(timesLabel)}
@@ -1053,20 +1102,22 @@ function renderProject(projectId) {
       `;
       }).join('');
     }
-    const uploadPostsBtn = document.getElementById('uploadPostsBtn');
-    if (uploadPostsBtn) {
-      uploadPostsBtn.onclick = () => {
-        // Reuse this page's single "page content" campaign so we don't start a new campaign—content lives only in this page profile.
+    const createPostTypeBtn = document.getElementById('createPostTypeBtn');
+    if (createPostTypeBtn) {
+      createPostTypeBtn.onclick = () => {
+        // Post type lives in the page profile; we still use a Recurring posts campaign on the backend.
         const pageContentCampaign = campaigns.find((c) => c.name === 'Recurring posts');
-        if (pageContentCampaign) {
-          location.hash = `#/campaign/${project.id}/${pageContentCampaign.id}`;
-          render();
-        } else {
-          apiCreateCampaign(project.id, 'Recurring posts').then((campaign) => {
-            location.hash = `#/campaign/${project.id}/${campaign.id}`;
+        const ensureCampaign = pageContentCampaign
+          ? Promise.resolve(pageContentCampaign)
+          : apiCreateCampaign(project.id, 'Recurring posts');
+        ensureCampaign.then((campaign) => {
+          return apiCreatePostType(project.id, campaign.id, 'New post type', 'video').then((c) => {
+            const pts = c.postTypes || [];
+            const newId = pts.length ? pts[pts.length - 1].id : null;
+            if (newId) location.hash = `#/project/${project.id}/content/${encodeURIComponent(newId)}`;
             render();
-          }).catch((err) => showAlert(err.message || 'Failed to create'));
-        }
+          });
+        }).catch((err) => showAlert(err.message || 'Failed to create'));
       };
     }
     document.getElementById('joinCampaignBtn').onclick = () => {
@@ -1106,12 +1157,16 @@ function openFolderModal(projectId, campaignId, folderNum, folderLabel, onClose)
   function refresh() {
     apiCampaignFolders(projectId, campaignId).then((data) => {
       const list = (data.folders || {})[`folder${folderNum}`] || [];
-      photos.innerHTML = list.map((filename) => `
+      photos.innerHTML = list.map((item) => {
+        const filename = typeof item === 'string' ? item : (item && item.filename) || '';
+        const usageCount = typeof item === 'object' && item && 'usageCount' in item ? item.usageCount : 0;
+        return `
         <div class="folder-modal-photo">
           <img data-src="${folderImageUrl(projectId, campaignId, folderNum, filename)}" alt="" loading="lazy" />
+          ${usageCount > 0 ? `<span class="folder-photo-usage-badge" title="Times used in runs">${usageCount}</span>` : ''}
           <button type="button" class="folder-modal-delete" data-filename="${escapeHtml(filename)}">×</button>
         </div>
-      `).join('');
+      `}).join('');
       photos.querySelectorAll('img[data-src]').forEach((img) => {
         withAuthQuery(img.dataset.src).then((url) => { img.src = url; img.removeAttribute('data-src'); });
       });
@@ -1197,7 +1252,7 @@ function renderMediaTypeSelector(pid, cid, ptId, project, campaign) {
   const title = campaignDisplayTitle(project, campaign);
   main.innerHTML = `
     <section class="card campaign-section">
-      <p class="back-link-wrap"><a href="#/campaign/${pid}/${cid}" class="nav-link">← Back to post types</a></p>
+      <p class="back-link-wrap"><a href="${contentBackLink(pid, cid)}" class="nav-link">← Back to post types</a></p>
       <h1>${escapeHtml(title)}</h1>
       <p class="hint" style="margin-bottom:20px;">Select whether this post type will use photos or videos.</p>
       <div class="media-type-selector">
@@ -1250,7 +1305,7 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
   }).join('');
   main.innerHTML = `
     <section class="card campaign-section campaign-page-card">
-      <p class="back-link-wrap"><a href="#/campaign/${pid}/${cid}" class="nav-link">← Back to post types</a></p>
+      <p class="back-link-wrap"><a href="${contentBackLink(pid, cid)}" class="nav-link">← Back to post types</a></p>
       <div class="campaign-page-header">
         <div class="campaign-page-header-spacer"></div>
         <div class="campaign-page-header-center">
@@ -1325,7 +1380,7 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
     const input = document.getElementById(`input${num}`);
     const viewBtn = dropzone && dropzone.querySelector('.dropzone-view');
     const addBtn = dropzone && dropzone.querySelector('.dropzone-add');
-    if (viewBtn) viewBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); location.hash = `#/campaign/${pid}/${cid}/pt/${encodeURIComponent(ptId)}/videos/${num}`; };
+    if (viewBtn) viewBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); location.hash = contentPostTypeLink(pid, cid, ptId, `videos/${num}`); };
     if (addBtn && input) addBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); input.click(); };
     if (dropzone && input) {
       dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('dragover'); };
@@ -1431,7 +1486,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
   const main = document.getElementById('main');
   main.innerHTML = `
     <section class="card campaign-section campaign-page-card">
-      <p class="back-link-wrap"><a href="#/campaign/${pid}/${cid}" class="nav-link">← Back to post types</a></p>
+      <p class="back-link-wrap"><a href="${contentBackLink(pid, cid)}" class="nav-link">← Back to post types</a></p>
       <div class="campaign-page-header">
         <div class="campaign-page-header-spacer"></div>
         <div class="campaign-page-header-center">
@@ -1469,7 +1524,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
     <section class="card">
       <h2>On-screen text options</h2>
       <p class="hint">One line is chosen at random per run and overlaid on the video.</p>
-      <a href="#/campaign/${pid}/${cid}/pt/${encodeURIComponent(ptId)}/folder/1" class="btn btn-secondary btn-folder-text">Edit on-screen text options</a>
+      <a href="${contentPostTypeLink(pid, cid, ptId, 'folder/1')}" class="btn btn-secondary btn-folder-text">Edit on-screen text options</a>
     </section>
     <section class="card">
       <h2>Text styling</h2>
@@ -1564,7 +1619,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
   const input = document.getElementById('input1');
   const viewBtn = dropzone && dropzone.querySelector('.dropzone-view');
   const addBtn = dropzone && dropzone.querySelector('.dropzone-add');
-  if (viewBtn) viewBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); location.hash = `#/campaign/${pid}/${cid}/pt/${encodeURIComponent(ptId)}/videos/1`; };
+  if (viewBtn) viewBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); location.hash = contentPostTypeLink(pid, cid, ptId, 'videos/1'); };
   if (addBtn && input) addBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); input.click(); };
   if (dropzone && input) {
     dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('dragover'); };
@@ -1740,10 +1795,11 @@ function renderPostTypeSelector(pid, cid, project, campaign) {
   const postTypes = campaign.postTypes || [];
   const main = document.getElementById('main');
   const hasPostTypes = postTypes.length > 0;
-  const isPageContent = isRecurringContentCampaign(project, campaign);
-  const backLink = isPageContent ? `#/project/${pid}` : `#/campaigns/${cid}`;
+  const isPageContent = isRecurringContentCampaign(project, campaign) || isProjectContent(pid);
+  const backLink = isPageContent ? contentBackLink(pid, cid) : `#/campaigns/${cid}`;
   const backLabel = isPageContent ? `← Back to ${escapeHtml(project.name)}` : '← Back to campaign';
   const title = campaignDisplayTitle(project, campaign);
+  const ptLink = (ptId) => contentPostTypeLink(pid, cid, ptId, '');
   const campaignAvatarSection = `<div class="campaign-header-avatar-inner"><img src="${campaignAvatarUrl(cid)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(title || 'C').charAt(0).toUpperCase()}</span></div>`;
   const pageIndicator = project.hasAvatar
     ? `<img src="${projectAvatarUrl(project.id)}" alt="" class="page-indicator-avatar" />`
@@ -1774,7 +1830,7 @@ function renderPostTypeSelector(pid, cid, project, campaign) {
       <div class="post-type-selector post-type-big-buttons">
         ${postTypes.map((pt) => `
           <div class="post-type-card-wrap">
-            <a href="#/campaign/${pid}/${cid}/pt/${encodeURIComponent(pt.id)}" class="post-type-card post-type-big-btn">
+            <a href="${ptLink(pt.id)}" class="post-type-card post-type-big-btn">
               <span class="post-type-name post-type-name-centered">${escapeHtml(pt.name)}</span>
             </a>
             <button type="button" class="btn btn-secondary btn-sm post-type-duplicate" data-pt-id="${encodeURIComponent(pt.id)}" data-pt-name="${escapeHtml(pt.name)}" data-pid="${pid}" data-cid="${cid}">Duplicate</button>
@@ -1804,8 +1860,8 @@ function renderPostTypeSelector(pid, cid, project, campaign) {
       if (addPostTypeModal) addPostTypeModal.hidden = true;
       const pts = c.postTypes || [];
       const id = pts.length ? pts[pts.length - 1].id : null;
-      if (id) location.hash = `#/campaign/${pid}/${cid}/pt/${encodeURIComponent(id)}`;
-      else render();
+      if (id) location.hash = isPageContent ? contentPostTypeLink(pid, cid, id, '') : `#/campaign/${pid}/${cid}/pt/${encodeURIComponent(id)}`;
+      render();
     }).catch((err) => showAlert(err.message || 'Failed'));
   };
   if (addPostTypeModal) {
@@ -1944,12 +2000,13 @@ function renderCampaign(projectId, campaignId, postTypeId) {
 
     const textButtons = [];
     for (let i = 1; i <= folderCount; i++) {
-      textButtons.push(`<a href="#/campaign/${pid}/${cid}/pt/${encodeURIComponent(ptId)}/folder/${i}" class="btn btn-secondary btn-folder-text">Folder ${i} – edit on-screen text</a>`);
+      textButtons.push(`<a href="${contentPostTypeLink(pid, cid, ptId, `folder/${i}`)}" class="btn btn-secondary btn-folder-text">Folder ${i} – edit on-screen text</a>`);
     }
 
     const title = campaignDisplayTitle(project, campaign);
-    const backTo = isRecurringContentCampaign(project, campaign) ? `#/project/${pid}` : `#/campaign/${pid}/${cid}`;
-    const backLabel = isRecurringContentCampaign(project, campaign) ? `← Back to ${escapeHtml(project.name)}` : '← Back to post types';
+    const isPageContentHere = isRecurringContentCampaign(project, campaign) || isProjectContent(pid);
+    const backTo = isPageContentHere ? contentBackLink(pid, cid) : `#/campaign/${pid}/${cid}`;
+    const backLabel = isPageContentHere ? `← Back to ${escapeHtml(project.name)}` : '← Back to post types';
     const campaignAvatarSection = `<div class="campaign-header-avatar-inner" id="campaignHeaderAvatarInner"><img src="${campaignAvatarUrl(cid)}" alt="" class="campaign-avatar-img" id="campaignAvatarImg" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" id="campaignAvatarPlaceholder" style="display:none;">${(campaign.name || 'C').charAt(0).toUpperCase()}</span></div><input type="file" accept="image/*" id="campaignAvatarInput" hidden />`;
     const pageIndicator = project.hasAvatar
       ? `<img src="${projectAvatarUrl(project.id)}" alt="" class="page-indicator-avatar" />`
@@ -1981,7 +2038,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
 
       <section class="card">
         <h2>Photo folders</h2>
-        <p class="hint">Click a folder to view, add, or delete photos. One image is picked at random from each folder per run.</p>
+        <p class="hint">Click a folder to view, add, or delete photos. One image with the lowest use number is picked from each folder per run (photos stay in the folder; the number on each shows how many times it has been used).</p>
         <div class="folders" id="foldersContainer">
           ${folderCards.join('')}
           <button type="button" class="btn btn-secondary add-folder-btn" id="addFolderBtn">+ Add folder</button>
@@ -2001,7 +2058,8 @@ function renderCampaign(projectId, campaignId, postTypeId) {
           ${Array.from({ length: folderCount }, (_, i) => {
             const f = i + 1;
             const ts = (campaign.textStylePerFolder && campaign.textStylePerFolder[i]) || campaign.textStyle || {};
-            const firstImg = (folders[`folder${f}`] || [])[0];
+            const firstItem = (folders[`folder${f}`] || [])[0];
+            const firstImg = typeof firstItem === 'string' ? firstItem : (firstItem && firstItem.filename);
             const imgUrl = firstImg ? folderImageUrl(pid, cid, f, firstImg, ptId) : '';
             const sampleText = (textOptionsPerFolder[f - 1] && textOptionsPerFolder[f - 1][0]) || 'Sample text';
             return `
@@ -2108,7 +2166,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
       const input = document.getElementById(`input${num}`);
       const viewBtn = dropzone && dropzone.querySelector('.dropzone-view');
       const addBtn = dropzone && dropzone.querySelector('.dropzone-add');
-      if (viewBtn) viewBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); location.hash = `#/campaign/${pid}/${cid}/pt/${encodeURIComponent(ptId)}/photos/${num}`; };
+      if (viewBtn) viewBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); location.hash = contentPostTypeLink(pid, cid, ptId, `photos/${num}`); };
       if (addBtn && input) addBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); input.click(); };
       if (dropzone && input) {
         dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('dragover'); };
@@ -2470,12 +2528,12 @@ function renderCampaignFolderPhotos(projectId, campaignId, folderNum, postTypeId
     const canDeleteFolder = folderCount > 1;
     main.innerHTML = `
       <section class="card">
-        <p class="back-link-wrap"><a href="#/campaign/${pid}/${cid}/pt/${encodeURIComponent(ptId)}" class="nav-link">← Back to post type</a></p>
+        <p class="back-link-wrap"><a href="${contentPostTypeLink(pid, cid, ptId, '')}" class="nav-link">← Back to post type</a></p>
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
           <h1 style="margin:0;">Folder ${fnum} – photos</h1>
           ${canDeleteFolder ? `<button type="button" class="btn btn-ghost" id="folderPhotosDeleteFolderBtn">Delete folder</button>` : ''}
         </div>
-        <p class="hint">Add or remove images. One image is picked at random from this folder per run.</p>
+        <p class="hint">Add or remove images. One image with the lowest use number is picked per run (all get used before any is reused). The number on each photo shows how many times it has been used.</p>
         <div class="folder-photos-grid" id="folderPhotosGrid"></div>
         <div class="folder-photos-actions" style="margin-top:1rem; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
           <input type="file" accept="image/*" multiple id="folderPhotosInput" hidden />
@@ -2493,12 +2551,16 @@ function renderCampaignFolderPhotos(projectId, campaignId, folderNum, postTypeId
       apiCampaignFolders(pid, cid, ptId).then((data) => {
         const imgs = (data.folders || {})[`folder${fnum}`] || [];
         if (!grid) return;
-        grid.innerHTML = imgs.map((filename) => `
+        grid.innerHTML = imgs.map((item) => {
+          const filename = typeof item === 'string' ? item : (item && item.filename) || '';
+          const usageCount = typeof item === 'object' && item && 'usageCount' in item ? item.usageCount : 0;
+          return `
           <div class="folder-photo-item">
             <img data-src="${folderImageUrl(pid, cid, fnum, filename, ptId)}" alt="" loading="lazy" />
+            ${usageCount > 0 ? `<span class="folder-photo-usage-badge" title="Times used in runs">${usageCount}</span>` : ''}
             <button type="button" class="folder-photo-delete" data-filename="${escapeHtml(filename)}">×</button>
           </div>
-        `).join('');
+        `}).join('');
         grid.querySelectorAll('img[data-src]').forEach((img) => {
           withAuthQuery(img.dataset.src).then((url) => { img.src = url; img.removeAttribute('data-src'); });
         });
@@ -2537,7 +2599,7 @@ function renderCampaignFolderPhotos(projectId, campaignId, folderNum, postTypeId
     if (deleteFolderBtn) deleteFolderBtn.onclick = () => {
       showConfirm(`Delete folder ${fnum} and its photos?`).then((ok) => {
         if (!ok) return;
-        apiDeleteFolder(pid, cid, fnum, ptId).then(() => { location.hash = `#/campaign/${pid}/${cid}/pt/${encodeURIComponent(ptId)}`; render(); }).catch((err) => showAlert(err.message || 'Failed'));
+        apiDeleteFolder(pid, cid, fnum, ptId).then(() => { location.hash = contentPostTypeLink(pid, cid, ptId, ''); render(); }).catch((err) => showAlert(err.message || 'Failed'));
       });
     };
   });
@@ -2564,7 +2626,7 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
     const main = document.getElementById('main');
     main.innerHTML = `
       <section class="card">
-        <p class="back-link-wrap"><a href="#/campaign/${pid}/${cid}/pt/${encodeURIComponent(ptId)}" class="nav-link">← Back to post type</a></p>
+        <p class="back-link-wrap"><a href="${contentPostTypeLink(pid, cid, ptId, '')}" class="nav-link">← Back to post type</a></p>
         <h1 style="margin:0;">${title}</h1>
         <p class="hint">${hint}</p>
         <div class="folder-photos-grid" id="folderVideosGrid"></div>
@@ -2646,7 +2708,7 @@ function renderCampaignFolderText(projectId, campaignId, folderNum, postTypeId) 
     const main = document.getElementById('main');
     main.innerHTML = `
       <section class="card" id="folderTextOptionsCard">
-        <p class="back-link-wrap"><a href="#/campaign/${pid}/${cid}/pt/${encodeURIComponent(ptId)}" class="nav-link">← Back to post type</a></p>
+        <p class="back-link-wrap"><a href="${contentPostTypeLink(pid, cid, ptId, '')}" class="nav-link">← Back to post type</a></p>
         <h1>Folder ${fnum} – on-screen text options</h1>
         <p class="hint">One option is chosen at random per image from this folder.</p>
         <ul class="text-options-list" id="folderTextList"></ul>
@@ -2868,7 +2930,7 @@ function renderCampaigns() {
 
 function renderCampaignDetail(campaignId) {
   const cid = campaignId;
-  Promise.all([
+  return Promise.all([
     apiProjects(),
     apiAllCampaigns(),
     apiDeployedPostsCount(campaignId).catch(() => ({ count: 0, byPage: {} })),
@@ -2945,10 +3007,11 @@ function renderCampaignDetail(campaignId) {
         </div>
         <div class="campaign-detail-trends-section" id="campaignTrendsSection" data-campaign-id="${escapeHtml(String(cid))}">
           <h3 class="settings-subtitle">Trends</h3>
-          <p class="hint">Add trends for your AI influencers. Each trend has its own pages, photos, schedule, and on-screen text.</p>
+          <p class="hint">One shared on-screen text applies to multiple pages. Set text options and styling, pick pages, then add folder photos and set the calendar for each page.</p>
+          <p class="field-label" style="margin-top:1rem;margin-bottom:0.5rem;">Trends in this campaign</p>
           <div class="campaign-trends-list" id="campaignTrendsList"></div>
           <div class="actions" style="margin-top:0.75rem;">
-            <button type="button" class="btn btn-secondary" id="campaignAddTrendBtn" data-action="add-trend">+ Add trend</button>
+            <button type="button" class="btn btn-secondary" id="campaignNewTrendBtn" data-action="campaign-new-trend" data-campaign-id="${escapeHtml(String(cid))}" data-page-ids="${escapeHtml(JSON.stringify(pageIds || []))}">New trend</button>
           </div>
         </div>
       </section>
@@ -3157,20 +3220,6 @@ function renderCampaignDetail(campaignId) {
       if (!available.length) { showAlert('All pages are already in this campaign.'); return; }
       openAddPageModal(cid, pageIds, available, () => renderCampaignDetail(cid));
     };
-    grid.querySelectorAll('.campaign-page-remove').forEach((btn) => {
-      btn.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const pageName = btn.dataset.pageName || 'this page';
-        showConfirm(`Are you sure you want to remove "${pageName}" from the campaign?`).then((ok) => {
-          if (!ok) return;
-          const removeId = parseInt(btn.dataset.pageId, 10);
-          const newPageIds = pageIds.filter((id) => id !== removeId);
-          if (newPageIds.length === 0) { showAlert('Campaign must have at least one page.'); return; }
-          apiUpdateCampaignPages(cid, newPageIds).then(() => renderCampaignDetail(cid)).catch((err) => showAlert(err.message || 'Failed'));
-        });
-      };
-    });
 
     const memberUsernames = campaign.memberUsernames || [];
     const campaignTeamList = document.getElementById('campaignTeamList');
@@ -3211,7 +3260,7 @@ function renderCampaignDetail(campaignId) {
     const trends = Array.isArray(campaignTrends) ? campaignTrends : [];
     if (campaignTrendsList) {
       if (!trends.length) {
-        campaignTrendsList.innerHTML = '<p class="hint">No trends yet. Add a trend to run scheduled posts across pages with shared text.</p>';
+        campaignTrendsList.innerHTML = '<p class="hint">No trends in this campaign yet. Click &quot;New trend&quot; below to add one.</p>';
       } else {
         const sorted = [...trends].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
         campaignTrendsList.innerHTML = sorted.map((t) => `
@@ -3239,24 +3288,6 @@ function renderCampaignDetail(campaignId) {
           };
         });
       }
-    }
-    const trendsSection = document.getElementById('campaignTrendsSection');
-    if (trendsSection) {
-      const goToNewTrend = () => {
-        try {
-          sessionStorage.setItem('newTrendContext', JSON.stringify({ campaignId: cid, defaultPageIds: pageIds }));
-        } catch (_) {}
-        window.location.hash = `#/trends/new/${cid}`;
-        render();
-      };
-      trendsSection.addEventListener('click', (e) => {
-        if (e.target.id !== 'campaignAddTrendBtn' && !e.target.closest('[data-action="add-trend"]')) return;
-        e.preventDefault();
-        e.stopPropagation();
-        goToNewTrend();
-      }, true);
-      const addTrendBtn = document.getElementById('campaignAddTrendBtn');
-      if (addTrendBtn) addTrendBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); goToNewTrend(); };
     }
   });
 }
@@ -3709,7 +3740,7 @@ function renderTrendNew(campaignIdFromRoute) {
 
 function renderTrendDetail(trendId) {
   const tid = trendId;
-  Promise.all([apiProjects(), apiTrend(tid), apiTrendLatest(tid)]).then(([projects, trend, latest]) => {
+  Promise.all([apiProjects(), apiTrend(tid), apiTrendLatest(tid), apiAllCampaigns()]).then(([projects, trend, latest, campaigns]) => {
     if (!trend) {
       document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap back-link-wrap-centered"><a href="#/trends" class="nav-link">← Back to trends</a></p><p>Trend not found.</p></section>';
       return;
@@ -3725,11 +3756,31 @@ function renderTrendDetail(trendId) {
       ? `<p class="back-link-wrap back-link-wrap-centered"><a href="#/campaigns/${escapeHtml(campaignId)}" class="nav-link">← Back to campaign</a></p>`
       : '<p class="back-link-wrap back-link-wrap-centered"><a href="#/trends" class="nav-link">← Back to trends</a></p>';
 
+    const campaignOptions = (campaigns || []).map((c) => {
+      const selected = campaignId === String(c.id) ? ' selected' : '';
+      return `<option value="${c.id}"${selected}>${escapeHtml(c.name)}</option>`;
+    }).join('');
+
     const main = document.getElementById('main');
     main.innerHTML = `
       <section class="card">
         ${backLink}
         <h1 id="trendDetailName" title="Double-click to rename">${escapeHtml(trend.name)}</h1>
+
+        <section class="card" style="margin-top:1rem;">
+          <h2>Campaign</h2>
+          <p class="hint">Optionally link this trend to a campaign. When linked, posting (Run now) is only allowed within the campaign's date window.</p>
+          <div class="trend-campaign-select-wrap" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <label class="field" style="min-width:200px;">
+              <span class="field-label">Connected campaign</span>
+              <select id="trendCampaignSelect" class="field-select">
+                <option value="">None</option>
+                ${campaignOptions}
+              </select>
+            </label>
+            <button type="button" class="btn btn-secondary btn-sm" id="trendSaveCampaignBtn" style="margin-top:1.25rem;">Save campaign link</button>
+          </div>
+        </section>
 
         <section class="card" style="margin-top:1rem;">
           <h2>On-screen text &amp; text styling</h2>
@@ -3759,17 +3810,95 @@ function renderTrendDetail(trendId) {
 
         <section class="card" style="margin-top:1rem;">
           <h2>Pages</h2>
-          <p class="hint">Add photos, set schedule, and run for each page.</p>
+          <p class="hint">Select which pages this trend applies to. For each page below: photo folders, schedule, run now, and generated URLs.</p>
+          <div class="trend-pages-select-wrap" id="trendPagesSelectWrap" style="margin-bottom:1rem;">
+            <span class="field-label">Attached pages</span>
+            <div id="trendPagesCheckboxes" class="new-campaign-pages" style="display:flex;flex-direction:column;gap:8px;margin-top:8px;"></div>
+            <button type="button" class="btn btn-secondary btn-sm" id="trendSavePagesBtn" style="margin-top:8px;">Save pages</button>
+          </div>
+          <div class="trend-folders-control" style="margin-bottom:1rem;">
+            <span class="field-label">Folders per page</span>
+            <span id="trendFolderCountDisplay" style="margin-right:8px;">${Math.max(1, parseInt(trend.folderCount, 10) || 3)}</span>
+            <button type="button" class="btn btn-ghost btn-sm" id="trendAddFolderBtn">+ Add folder</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="trendDeleteFolderBtn">− Delete folder</button>
+          </div>
           <div class="trend-pages-grid" id="trendPagesGrid"></div>
+          <input type="file" accept="image/*" multiple id="trendFolderUploadInput" style="position:absolute;width:0;height:0;opacity:0;pointer-events:none;" />
         </section>
       </section>
     `;
+
+    let trendUploadTarget = null;
+    const trendFolderUploadInput = document.getElementById('trendFolderUploadInput');
+    if (trendFolderUploadInput) {
+      trendFolderUploadInput.onchange = (e) => {
+        const files = e.target.files;
+        e.target.value = '';
+        if (!files || !files.length || !trendUploadTarget) return;
+        const { pageIndex, folderNum, refreshPageFolders } = trendUploadTarget;
+        trendUploadTarget = null;
+        apiTrendPageFolderUpload(tid, pageIndex, folderNum, Array.from(files))
+          .then(() => { if (typeof refreshPageFolders === 'function') refreshPageFolders(); showAlert('Photos added.'); })
+          .catch((err) => showAlert(err.message || 'Upload failed'));
+      };
+    }
 
     document.getElementById('trendDetailName').ondblclick = () => {
       showPrompt('Trend name:', trend.name).then((name) => {
         if (name != null && name.trim()) apiUpdateTrend(tid, { name: name.trim() }).then((t) => { trend = t; document.getElementById('trendDetailName').textContent = t.name; });
       });
     };
+
+    const pagesCheckboxesEl = document.getElementById('trendPagesCheckboxes');
+    const savePagesBtn = document.getElementById('trendSavePagesBtn');
+    if (pagesCheckboxesEl && Array.isArray(projects)) {
+      const currentPageIds = trend.pageIds && trend.pageIds.length ? trend.pageIds : [];
+      pagesCheckboxesEl.innerHTML = projects.map((p) => {
+        const checked = currentPageIds.includes(p.id) ? ' checked' : '';
+        return `<label class="checkbox-field" style="display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" class="trend-page-cb" value="${p.id}"${checked} />
+          <span>${escapeHtml(p.name)}</span>
+        </label>`;
+      }).join('');
+    }
+    if (savePagesBtn) {
+      savePagesBtn.onclick = () => {
+        const selectedIds = Array.from(main.querySelectorAll('.trend-page-cb:checked')).map((cb) => parseInt(cb.value, 10)).filter((id) => !isNaN(id));
+        if (!selectedIds.length) { showAlert('Select at least one page'); return; }
+        apiUpdateTrend(tid, { pageIds: selectedIds })
+          .then((t) => { trend = t; showAlert('Pages saved.'); renderTrendDetail(tid); })
+          .catch((err) => showAlert(err.message || 'Failed to save pages'));
+      };
+    }
+
+    const trendCampaignSelect = document.getElementById('trendCampaignSelect');
+    const trendSaveCampaignBtn = document.getElementById('trendSaveCampaignBtn');
+    if (trendSaveCampaignBtn && trendCampaignSelect) {
+      trendSaveCampaignBtn.onclick = () => {
+        const val = trendCampaignSelect.value;
+        const campaignId = val ? String(val) : null;
+        apiUpdateTrend(tid, { campaignId })
+          .then((t) => { trend = t; showAlert('Campaign link saved.'); renderTrendDetail(tid); })
+          .catch((err) => showAlert(err.message || 'Failed to save campaign link'));
+      };
+    }
+
+    const trendFolderCountDisplay = document.getElementById('trendFolderCountDisplay');
+    const addFolderBtn = document.getElementById('trendAddFolderBtn');
+    const deleteFolderBtn = document.getElementById('trendDeleteFolderBtn');
+    if (addFolderBtn) {
+      addFolderBtn.onclick = () => {
+        const next = Math.min(20, (parseInt(trend.folderCount, 10) || 3) + 1);
+        apiUpdateTrend(tid, { folderCount: next }).then((t) => { trend = t; renderTrendDetail(tid); }).catch((err) => showAlert(err.message || 'Failed'));
+      };
+    }
+    if (deleteFolderBtn) {
+      deleteFolderBtn.onclick = () => {
+        const current = Math.max(1, parseInt(trend.folderCount, 10) || 3);
+        if (current <= 1) { showAlert('At least one folder is required.'); return; }
+        apiUpdateTrend(tid, { folderCount: current - 1 }).then((t) => { trend = t; renderTrendDetail(tid); }).catch((err) => showAlert(err.message || 'Failed'));
+      };
+    }
 
     document.getElementById('trendSaveTextStyle').onclick = () => {
       const textOptionsArr = (document.getElementById('trendTextOptions').value || '').trim().split(/\n/).map((s) => s.trim()).filter(Boolean);
@@ -3799,14 +3928,17 @@ function renderTrendDetail(trendId) {
       const scheduleEnd = schedule.scheduleEndDate || '';
       const folderCardsHtml = Array.from({ length: folderCount }, (_, i) => {
         const f = i + 1;
+        const isLast = f === folderCount;
+        const canDelete = folderCount > 1 && isLast;
         return `
           <div class="folder trend-folder" data-folder="${f}">
             <div class="dropzone trend-dropzone" data-trend-id="${tid}" data-page-index="${pageIndex}" data-folder-num="${f}">
               <span class="dropzone-label">Folder ${f}</span>
               <span class="trend-folder-count" data-page-index="${pageIndex}" data-folder-num="${f}">0 photos</span>
+              <div class="trend-folder-photos" data-folder-num="${f}"></div>
               <button type="button" class="btn btn-secondary btn-sm dropzone-add">Add photos</button>
               <button type="button" class="btn btn-ghost btn-sm trend-folder-preview" data-page-index="${pageIndex}" data-folder-num="${f}">Preview</button>
-              <input type="file" accept="image/*" multiple hidden data-trend-id="${tid}" data-page-index="${pageIndex}" data-folder-num="${f}" />
+              ${canDelete ? `<button type="button" class="btn btn-ghost btn-sm trend-delete-folder" data-folder-num="${f}" aria-label="Delete folder">Delete folder</button>` : ''}
             </div>
           </div>
         `;
@@ -3837,8 +3969,9 @@ function renderTrendDetail(trendId) {
           <button type="button" class="btn btn-secondary btn-sm trend-save-schedule-btn" data-page-id="${p.id}" style="margin-top:8px;">Save schedule</button>
         </div>
         <div class="trend-page-run">
-          <h4>Generated URLs</h4>
-          <p class="hint">Use &quot;Run now&quot; at the top to generate one image per folder per page with the shared text.</p>
+          <h4>Run &amp; generated URLs</h4>
+          <button type="button" class="btn btn-primary btn-sm trend-page-run-now" data-page-id="${p.id}" style="margin-bottom:8px;">Run now</button>
+          <p class="hint">Generates one image per folder for this trend (shared text). URLs appear below.</p>
           <div class="trend-urls-list" data-page-id="${p.id}"></div>
         </div>
       `;
@@ -3850,9 +3983,28 @@ function renderTrendDetail(trendId) {
           const folders = data.folders || {};
           card.querySelectorAll('.trend-folder').forEach((el, i) => {
             const f = i + 1;
-            const count = (folders[`folder${f}`] || []).length;
+            const items = folders[`folder${f}`] || [];
+            const count = items.length;
             const countEl = el.querySelector('.trend-folder-count');
             if (countEl) countEl.textContent = `${count} photo${count !== 1 ? 's' : ''}`;
+            const photosEl = el.querySelector('.trend-folder-photos');
+            if (photosEl) {
+              const filenames = items.map((it) => typeof it === 'string' ? it : (it && it.filename) || '');
+              if (filenames.length === 0) {
+                photosEl.innerHTML = '';
+                photosEl.style.display = 'none';
+              } else {
+                photosEl.style.display = '';
+                photosEl.innerHTML = filenames.map((name) => `
+                  <div class="trend-folder-photo-item">
+                    <img alt="" loading="lazy" data-src="${trendFolderImageUrl(tid, pageIndex, f, name)}" />
+                  </div>
+                `).join('');
+                photosEl.querySelectorAll('img[data-src]').forEach((img) => {
+                  withAuthQuery(img.dataset.src).then((url) => { img.src = url; img.removeAttribute('data-src'); });
+                });
+              }
+            }
           });
         }).catch(() => {});
       }
@@ -3860,22 +4012,30 @@ function renderTrendDetail(trendId) {
 
       card.querySelectorAll('.trend-dropzone').forEach((dz) => {
         const folderNum = parseInt(dz.dataset.folderNum, 10);
-        const addBtn = dz.querySelector('.dropzone-add');
-        const input = dz.querySelector('input[type="file"]');
+        const addBtn = dz.querySelector('button.dropzone-add');
         const previewBtn = dz.querySelector('.trend-folder-preview');
-        if (addBtn) addBtn.onclick = (e) => { e.stopPropagation(); input.click(); };
+        if (addBtn && trendFolderUploadInput) {
+          addBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            trendUploadTarget = { pageIndex, folderNum, refreshPageFolders };
+            trendFolderUploadInput.click();
+          };
+        }
         dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('dragover'); };
         dz.ondragleave = () => dz.classList.remove('dragover');
         dz.ondrop = (e) => {
           e.preventDefault();
           dz.classList.remove('dragover');
           const files = e.dataTransfer.files;
-          if (files && files.length) apiTrendPageFolderUpload(tid, pageIndex, folderNum, files).then(() => refreshPageFolders()).catch((err) => showAlert(err.message || 'Upload failed'));
+          if (files && files.length) apiTrendPageFolderUpload(tid, pageIndex, folderNum, Array.from(files)).then(() => refreshPageFolders()).catch((err) => showAlert(err.message || 'Upload failed'));
         };
-        dz.onclick = (e) => { if (e.target !== addBtn && e.target !== previewBtn) input.click(); };
-        input.onchange = (e) => {
-          const files = e.target.files;
-          if (files && files.length) apiTrendPageFolderUpload(tid, pageIndex, folderNum, files).then(() => { refreshPageFolders(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed'));
+        dz.onclick = (e) => {
+          if (e.target === previewBtn || addBtn?.contains(e.target) || dz.querySelector('.trend-folder-photos')?.contains(e.target)) return;
+          if (trendFolderUploadInput) {
+            trendUploadTarget = { pageIndex, folderNum, refreshPageFolders };
+            trendFolderUploadInput.click();
+          }
         };
         if (previewBtn) previewBtn.onclick = (e) => {
           e.stopPropagation();
@@ -3925,6 +4085,31 @@ function renderTrendDetail(trendId) {
       const urlListEl = card.querySelector('.trend-urls-list');
       const urlsForPage = latestUrls.filter((u) => u.pageId === p.id).map((u) => u.url);
       urlListEl.innerHTML = urlsForPage.length ? urlsForPage.map((u) => `<p class="url-item"><a href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a></p>`).join('') : '<p class="hint">Run once to see URLs.</p>';
+
+      const runNowBtn = card.querySelector('.trend-page-run-now');
+      if (runNowBtn) {
+        runNowBtn.onclick = () => {
+          const textOptionsArr = (document.getElementById('trendTextOptions') && document.getElementById('trendTextOptions').value || '').trim().split(/\n/).map((s) => s.trim()).filter(Boolean);
+          const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat((document.getElementById('trendTextSize') || {}).value) || 48)));
+          const textStyleObj = {
+            x: parseFloat((document.getElementById('trendTextX') || {}).value) ?? 0,
+            y: parseFloat((document.getElementById('trendTextY') || {}).value) ?? 0,
+            fontSize: sizePx,
+            font: ((document.getElementById('trendTextFont') || {}).value || 'Arial, sans-serif').trim(),
+            color: ((document.getElementById('trendTextColor') || {}).value || 'white').trim(),
+            strokeWidth: parseFloat((document.getElementById('trendTextStroke') || {}).value) ?? 2,
+          };
+          apiTrendRun(tid, textStyleObj, textOptionsArr.length ? textOptionsArr : null).then(() => renderTrendDetail(tid)).catch((err) => showAlert(err.message || 'Run failed'));
+        };
+      }
+
+      card.querySelectorAll('.trend-delete-folder').forEach((delBtn) => {
+        delBtn.onclick = () => {
+          const current = Math.max(1, parseInt(trend.folderCount, 10) || 3);
+          if (current <= 1) { showAlert('At least one folder is required.'); return; }
+          apiUpdateTrend(tid, { folderCount: current - 1 }).then((t) => { trend = t; renderTrendDetail(tid); }).catch((err) => showAlert(err.message || 'Failed'));
+        };
+      });
     });
 
     document.getElementById('trendRunNow').onclick = () => {
@@ -3991,6 +4176,8 @@ function renderCalendar() {
 }
 
 function render() {
+  projectContentMode = false;
+  projectContentProjectId = null;
   updateNavActive();
   const route = getRoute();
   if (route.view === 'dashboard') renderDashboard();
@@ -4003,6 +4190,28 @@ function render() {
   else if (route.view === 'trendDetail') renderTrendDetail(route.trendId);
   else if (route.view === 'project') renderProject(route.projectId);
   else if (route.view === 'projectUsed') renderProjectUsed(route.projectId);
+  else if (route.view === 'projectContentList' || route.view === 'projectContent' || route.view === 'projectContentFolder' || route.view === 'projectContentFolderPhotos' || route.view === 'projectContentFolderVideos') {
+    const pid = route.projectId;
+    const ptId = route.postTypeId;
+    apiCampaigns(pid).then((campaigns) => {
+      const recurring = Array.isArray(campaigns) ? campaigns.find((c) => c.name === 'Recurring posts') : null;
+      if (!recurring) {
+        window.location.hash = `#/project/${pid}`;
+        render();
+        return;
+      }
+      projectContentMode = true;
+      projectContentProjectId = pid;
+      if (route.view === 'projectContentFolder') renderCampaignFolderText(pid, recurring.id, route.folderNum, ptId);
+      else if (route.view === 'projectContentFolderPhotos') renderCampaignFolderPhotos(pid, recurring.id, route.folderNum, ptId);
+      else if (route.view === 'projectContentFolderVideos') renderCampaignFolderVideos(pid, recurring.id, route.folderNum, ptId);
+      else if (route.view === 'projectContentList') renderCampaign(pid, recurring.id, null);
+      else renderCampaign(pid, recurring.id, ptId);
+    }).catch(() => {
+      window.location.hash = `#/project/${pid}`;
+      render();
+    });
+  }
   else if (route.view === 'campaign') renderCampaign(route.projectId, route.campaignId, route.postTypeId);
   else if (route.view === 'campaignFolder') renderCampaignFolderText(route.projectId, route.campaignId, route.folderNum, route.postTypeId);
   else if (route.view === 'campaignFolderPhotos') renderCampaignFolderPhotos(route.projectId, route.campaignId, route.folderNum, route.postTypeId);
@@ -4211,6 +4420,31 @@ window.addEventListener('hashchange', () => {
 });
 
 document.addEventListener('click', (e) => {
+  const newTrendBtn = e.target.closest('[data-action="campaign-new-trend"]');
+  if (newTrendBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    const cid = newTrendBtn.getAttribute('data-campaign-id');
+    let pageIds = [];
+    try {
+      const raw = newTrendBtn.getAttribute('data-page-ids');
+      if (raw) pageIds = JSON.parse(raw);
+    } catch (_) {}
+    if (!cid) { showAlert('Missing campaign'); return; }
+    apiCreateTrend('New trend', Array.isArray(pageIds) ? pageIds : [], cid)
+      .then((t) => {
+        if (!t || t.id == null) {
+          showAlert(t && t.error ? t.error : 'Failed to create trend');
+          return;
+        }
+        return renderCampaignDetail(cid).then(() => {
+          window.location.hash = '#/trends/' + t.id;
+          render();
+        });
+      })
+      .catch((err) => showAlert(err && err.message ? err.message : 'Failed to create trend'));
+    return;
+  }
   if (e.target.closest('.campaign-page-remove') || e.target.closest('.campaign-page-ugc-select')) return;
   const link = e.target.closest('.campaign-pages-grid a.campaign-page-card');
   if (!link) return;
