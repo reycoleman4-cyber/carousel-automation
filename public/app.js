@@ -257,14 +257,29 @@ function apiUpdateProject(id, data) {
 function apiDeleteProject(id) {
   return apiWithAuth(`${API}/api/projects/${id}`, { method: 'DELETE' }).then((r) => r.json());
 }
+function apiRecurringPagesGet() {
+  return apiWithAuth(`${API}/api/recurring-pages`).then((r) => r.json()).then((d) => d.projectIds || []);
+}
+function apiRecurringPagesAdd(projectId) {
+  return apiWithAuth(`${API}/api/recurring-pages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectId: parseInt(projectId, 10) }),
+  }).then((r) => r.json()).then((d) => d.projectIds || []);
+}
+function apiRecurringPagesRemove(projectId) {
+  return apiWithAuth(`${API}/api/recurring-pages/${projectId}`, { method: 'DELETE' }).then((r) => r.json()).then((d) => d.projectIds || []);
+}
 function apiCampaigns(projectId) {
   return apiWithAuth(`${API}/api/projects/${projectId}/campaigns`).then((r) => r.json());
 }
-function apiCreateCampaign(projectId, name) {
+function apiCreateCampaign(projectId, name, options) {
+  const body = { name: name || 'New campaign' };
+  if (options && options.isPageNative) body.isPageNative = true;
   return apiWithAuth(`${API}/api/projects/${projectId}/campaigns`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: name || 'New campaign' }),
+    body: JSON.stringify(body),
   }).then((r) => r.json());
 }
 function apiCampaign(projectId, campaignId, postTypeId) {
@@ -361,11 +376,26 @@ function projectAvatarUrl(projectId) {
 function apiCampaignUpload(projectId, campaignId, folderNum, files, postTypeId, mediaType) {
   const form = new FormData();
   const isVideo = mediaType === 'video' || mediaType === 'video_text';
+  const videoExt = /\.(mp4|mov|webm|avi|mkv|m4v)(\?|$)/i;
   for (const file of Array.from(files)) {
-    if (isVideo && file.type.startsWith('video/')) form.append('photo', file);
-    else if (!isVideo && file.type.startsWith('image/')) form.append('photo', file);
+    if (isVideo) {
+      const name = file.name || '';
+      const hasVideoMime = file.type && file.type.startsWith('video/');
+      const hasVideoExt = videoExt.test(name);
+      const genericMime = !file.type || file.type === 'application/octet-stream';
+      if (hasVideoMime || hasVideoExt || (genericMime && /\.(mp4|mov|webm|avi|mkv|m4v)/i.test(name))) form.append('photo', file);
+    } else {
+      if (file.type.startsWith('image/')) form.append('photo', file);
+    }
   }
-  let url = `${API}/api/projects/${projectId}/campaigns/${campaignId}/upload?folder=${folderNum}`;
+  const appended = form.getAll ? form.getAll('photo') : [];
+  if (!appended.length) {
+    const msg = isVideo
+      ? 'No valid video files. Use MP4, MOV, WebM, AVI, MKV, or M4V, or try a different file.'
+      : 'No valid image files. Use JPEG, PNG, WebP, or GIF.';
+    return Promise.reject(new Error(msg));
+  }
+  let url = `${API}/api/projects/${projectId}/campaigns/${campaignId}/upload?folder=${folderNum}&projectId=${encodeURIComponent(projectId)}&campaignId=${encodeURIComponent(campaignId)}`;
   if (postTypeId) url += `&postTypeId=${encodeURIComponent(postTypeId)}`;
   if (mediaType === 'video') url += `&mediaType=video`;
   if (mediaType === 'video_text') url += `&mediaType=video_text`;
@@ -374,16 +404,21 @@ function apiCampaignUpload(projectId, campaignId, folderNum, files, postTypeId, 
     body: form,
   }).then(async (r) => {
     const text = await r.text();
-    if (!r.ok) throw new Error(tryParse(text).error || text || 'Upload failed');
+    if (!r.ok) {
+      const err = tryParse(text);
+      const msg = err?.error || (text && text.length < 200 ? text : null) || `Upload failed (${r.status})`;
+      throw new Error(msg);
+    }
     return text ? JSON.parse(text) : {};
   });
 }
-function apiCampaignRun(projectId, campaignId, textStylePerFolder, textOptionsPerFolder, sendAsDraft, postTypeId) {
+function apiCampaignRun(projectId, campaignId, textStylePerFolder, textOptionsPerFolder, sendAsDraft, addMusicToCarousel, postTypeId) {
   const body = {};
   if (postTypeId) body.postTypeId = postTypeId;
   if (Array.isArray(textStylePerFolder) && textStylePerFolder.length) body.textStylePerFolder = textStylePerFolder;
   if (Array.isArray(textOptionsPerFolder) && textOptionsPerFolder.length) body.textOptionsPerFolder = textOptionsPerFolder;
   if (sendAsDraft === true) body.sendAsDraft = true;
+  if (addMusicToCarousel === true) body.addMusicToCarousel = true;
   return apiWithAuth(`${API}/api/projects/${projectId}/campaigns/${campaignId}/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -424,12 +459,6 @@ function apiCampaignLatest(projectId, campaignId) {
 function apiClearCampaignUrls(projectId, campaignId) {
   return apiWithAuth(`${API}/api/projects/${projectId}/campaigns/${campaignId}/latest`, { method: 'DELETE' }).then((r) => r.json());
 }
-function apiProjectUsed(projectId) {
-  return apiWithAuth(`${API}/api/projects/${projectId}/used`).then((r) => r.json());
-}
-function projectUsedImageUrl(projectId, filename) {
-  return `${API}/api/projects/${projectId}/used/images/${encodeURIComponent(filename)}`;
-}
 function apiAllCampaigns() {
   return apiWithAuth(`${API}/api/campaigns`).then((r) => r.json());
 }
@@ -458,6 +487,18 @@ function apiUploadCampaignAvatar(campaignId, file) {
 }
 function campaignAvatarUrl(campaignId) {
   return `${API}/api/campaigns/${campaignId}/avatar?t=${Date.now()}`;
+}
+function trendAvatarUrl(trendId) {
+  return `${API}/api/trends/${trendId}/avatar?t=${Date.now()}`;
+}
+function apiUploadTrendAvatar(trendId, file) {
+  const form = new FormData();
+  form.append('avatar', file);
+  return apiWithAuth(`${API}/api/trends/${trendId}/avatar`, { method: 'POST', body: form }).then(async (r) => {
+    const text = await r.text();
+    if (!r.ok) throw new Error(tryParse(text).error || (text.length < 200 ? text : 'Upload failed'));
+    return text ? JSON.parse(text) : {};
+  });
 }
 
 function apiTrends(campaignId) {
@@ -523,11 +564,14 @@ function apiTrendPreview(trendId, pageIndex, folderNum, textStyle, textOptions) 
     body: JSON.stringify({ pageIndex, folderNum, textStyle, textOptions }),
   }).then((r) => r.json());
 }
-function apiTrendRun(trendId, textStyle, textOptions) {
+function apiTrendRun(trendId, textStyle, textOptions, sendAsDraft, addMusicToCarousel) {
+  const body = { textStyle: textStyle || null, textOptions: textOptions || null };
+  if (sendAsDraft === true) body.sendAsDraft = true;
+  if (addMusicToCarousel === true) body.addMusicToCarousel = true;
   return apiWithAuth(`${API}/api/trends/${trendId}/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ textStyle: textStyle || null, textOptions: textOptions || null }),
+    body: JSON.stringify(body),
   }).then(async (r) => {
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error || r.statusText || 'Run failed');
@@ -554,6 +598,25 @@ function apiUpdatePostType(projectId, campaignId, postTypeId, data) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(typeof data === 'string' ? { name: data } : data),
   }).then((r) => r.json());
+}
+function apiTextPresets() {
+  return apiWithAuth(`${API}/api/text-presets`).then((r) => r.json());
+}
+function apiCreateTextPreset(name, file) {
+  const form = new FormData();
+  form.append('name', name);
+  form.append('file', file);
+  return apiWithAuth(`${API}/api/text-presets`, { method: 'POST', body: form }).then(async (r) => {
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const msg = data.error || (r.status === 401 ? 'Sign in required' : `Upload failed (${r.status})`);
+      throw new Error(msg);
+    }
+    return data;
+  });
+}
+function apiDeleteTextPreset(presetId) {
+  return apiWithAuth(`${API}/api/text-presets/${encodeURIComponent(presetId)}`, { method: 'DELETE' }).then((r) => r.json());
 }
 function apiDeletePostType(projectId, campaignId, postTypeId) {
   return apiWithAuth(`${API}/api/projects/${projectId}/campaigns/${campaignId}/postTypes/${encodeURIComponent(postTypeId)}`, { method: 'DELETE' }).then((r) => r.json());
@@ -636,6 +699,22 @@ async function apiWithAuth(url, options = {}) {
   return fetch(url, { ...options, headers });
 }
 
+/** Load an image URL with auth and return an object URL so it displays reliably (e.g. in folder detail). */
+async function fetchImageAsObjectUrl(url) {
+  const res = await apiWithAuth(url);
+  if (!res.ok) throw new Error('Image load failed');
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
+/** Load a video URL with auth and return an object URL so it plays in a video element (avoids blocked/cross-origin issues). */
+async function fetchVideoAsObjectUrl(url) {
+  const res = await apiWithAuth(url);
+  if (!res.ok) throw new Error('Video load failed');
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
 function apiProfileLookup(username) {
   return getAuthHeaders().then((h) =>
     fetch(`${API}/api/profiles/lookup?username=${encodeURIComponent(username)}`, { headers: h }).then((r) => {
@@ -677,36 +756,34 @@ function updateNavActive() {
   const home = document.getElementById('navHome');
   const campaigns = document.getElementById('navCampaigns');
   const trends = document.getElementById('navTrends');
-  const calendar = document.getElementById('navCalendar');
-  const logins = document.getElementById('navLogins');
-  const settings = document.getElementById('openSettings');
-  const settingsModal = document.getElementById('settingsModal');
-  [home, campaigns, trends, calendar, logins].forEach((el) => { if (el) el.classList.remove('active'); });
-  if (settings) settings.classList.remove('active');
-  if (settingsModal && !settingsModal.hidden && settings) {
-    settings.classList.add('active');
-  } else if (first === '' || first === 'project') {
+  const pages = document.getElementById('navPages');
+  const recurringPages = document.getElementById('navRecurringPages');
+  [home, campaigns, trends, pages, recurringPages].forEach((el) => { if (el) el.classList.remove('active'); });
+  if (first === '') {
     if (home) home.classList.add('active');
+  } else if (first === 'pages' || first === 'project') {
+    if (pages) pages.classList.add('active');
   } else if (first === 'campaigns' || first === 'campaign') {
     if (campaigns) campaigns.classList.add('active');
   } else if (first === 'trends' || (first && first.startsWith('trends'))) {
     if (trends) trends.classList.add('active');
-  } else if (first === 'calendar') {
-    if (calendar) calendar.classList.add('active');
-  } else if (first === 'logins') {
-    if (logins) logins.classList.add('active');
+  } else if (first === 'recurring-pages') {
+    if (recurringPages) recurringPages.classList.add('active');
   }
 }
 
 /** When true, campaign/post-type views use project-based URLs (#/project/X/content/Y) and "Back to [page]". Set when resolving project content route. */
 let projectContentMode = false;
 let projectContentProjectId = null;
+/** When true, we are in Recurring Pages flow; back link and content links use #/recurring-pages. */
+let fromRecurringPages = false;
 
 function getRoute() {
   const hash = window.location.hash.slice(1) || '/';
   const parts = hash.split('/').filter(Boolean);
   if (parts[0] === 'calendar') return { view: 'calendar' };
   if (parts[0] === 'logins') return { view: 'logins' };
+  if (parts[0] === 'settings') return { view: 'settings' };
   if (parts[0] === 'campaigns') {
     if (parts[1]) return { view: 'campaignDetail', campaignId: parts[1] };
     return { view: 'campaigns' };
@@ -717,7 +794,6 @@ function getRoute() {
     return { view: 'trends' };
   }
   if (parts[0] === 'project' && parts[1]) {
-    if (parts[2] === 'used') return { view: 'projectUsed', projectId: parts[1] };
     if (parts[2] === 'content') {
       const projectId = parts[1];
       const postTypeId = parts[3] || null;
@@ -741,6 +817,22 @@ function getRoute() {
     if (parts[3] === 'folder' && parts[4]) return { view: 'campaignFolder', projectId: parts[1], campaignId: parts[2], postTypeId: 'default', folderNum: parts[4] };
     if (parts[3] === 'photos' && parts[4]) return { view: 'campaignFolderPhotos', projectId: parts[1], campaignId: parts[2], postTypeId: 'default', folderNum: parts[4] };
     return { view: 'campaign', projectId: parts[1], campaignId: parts[2], postTypeId: null };
+  }
+  if (parts[0] === 'pages') return { view: 'pages' };
+  if (parts[0] === 'recurring-pages') {
+    if (!parts[1]) return { view: 'recurringPages' };
+    const projectId = parts[1];
+    if (parts[2] === 'content') {
+      const postTypeId = parts[3] || null;
+      if (postTypeId) {
+        if (parts[4] === 'folder' && parts[5]) return { view: 'recurringPageContentFolder', projectId, postTypeId, folderNum: parts[5] };
+        if (parts[4] === 'photos' && parts[5]) return { view: 'recurringPageContentFolderPhotos', projectId, postTypeId, folderNum: parts[5] };
+        if (parts[4] === 'videos' && parts[5]) return { view: 'recurringPageContentFolderVideos', projectId, postTypeId, folderNum: parts[5] };
+        return { view: 'recurringPageContent', projectId, postTypeId };
+      }
+      return { view: 'recurringPageContentList', projectId };
+    }
+    return { view: 'recurringPageDetail', projectId };
   }
   return { view: 'dashboard' };
 }
@@ -776,15 +868,28 @@ function isProjectContent(pid) {
   return projectContentMode && projectContentProjectId != null && String(projectContentProjectId) === String(pid);
 }
 
-/** Link to post type or sub-route; uses project content URL when in project content mode. */
+/** Run the appropriate campaign/content view for a recurring-pages route. */
+function runRecurringPageContentRoute(route, pid, recurringCampaignId) {
+  const ptId = route.postTypeId;
+  if (route.view === 'recurringPageContentFolder') renderCampaignFolderText(pid, recurringCampaignId, route.folderNum, ptId);
+  else if (route.view === 'recurringPageContentFolderPhotos') renderCampaignFolderPhotos(pid, recurringCampaignId, route.folderNum, ptId);
+  else if (route.view === 'recurringPageContentFolderVideos') renderCampaignFolderVideos(pid, recurringCampaignId, route.folderNum, ptId);
+  else if (route.view === 'recurringPageContentList' || route.view === 'recurringPageDetail') renderCampaign(pid, recurringCampaignId, null);
+  else renderCampaign(pid, recurringCampaignId, ptId);
+}
+
+/** Link to post type or sub-route; uses project content URL when in project content mode; uses recurring-pages when fromRecurringPages. */
 function contentPostTypeLink(pid, cid, ptId, subPath) {
   const enc = (id) => encodeURIComponent(id);
+  if (fromRecurringPages && projectContentProjectId != null && String(projectContentProjectId) === String(pid))
+    return `#/recurring-pages/${pid}/content/${enc(ptId)}${subPath ? '/' + subPath : ''}`;
   if (isProjectContent(pid)) return `#/project/${pid}/content/${enc(ptId)}${subPath ? '/' + subPath : ''}`;
   return `#/campaign/${pid}/${cid}/pt/${enc(ptId)}${subPath ? '/' + subPath : ''}`;
 }
 
-/** Back link from post type list; to project or campaign list. */
+/** Back link from post type list; to project, recurring pages, or campaign list. */
 function contentBackLink(pid, cid) {
+  if (fromRecurringPages) return '#/recurring-pages';
   if (isProjectContent(pid)) return `#/project/${pid}`;
   return `#/campaign/${pid}/${cid}`;
 }
@@ -848,6 +953,166 @@ function formatCalendarDate(dateStr) {
   return dateStr;
 }
 
+const CALENDAR_TIMEZONES = [
+  { id: 'America/New_York', label: 'Eastern Time (ET) – America/New_York' },
+  { id: 'America/Chicago', label: 'Central Time (CT) – America/Chicago' },
+  { id: 'America/Denver', label: 'Mountain Time (MT) – America/Denver' },
+  { id: 'America/Los_Angeles', label: 'Pacific Time (PT) – America/Los_Angeles' },
+  { id: 'America/Anchorage', label: 'Alaska Time – America/Anchorage' },
+  { id: 'Pacific/Honolulu', label: 'Hawaii Time – Pacific/Honolulu' },
+  { id: 'Europe/London', label: 'London (GMT/BST) – Europe/London' },
+  { id: 'Europe/Paris', label: 'Central European Time (CET) – Europe/Paris' },
+  { id: 'Europe/Athens', label: 'Eastern European Time (EET) – Europe/Athens' },
+  { id: 'Europe/Lisbon', label: 'Portugal (WET) – Europe/Lisbon' },
+  { id: 'Asia/Kolkata', label: 'India Standard Time (IST) – Asia/Kolkata' },
+  { id: 'Asia/Tokyo', label: 'Japan Standard Time (JST) – Asia/Tokyo' },
+  { id: 'Asia/Seoul', label: 'Korea Standard Time (KST) – Asia/Seoul' },
+  { id: 'Asia/Singapore', label: 'Singapore Time – Asia/Singapore' },
+  { id: 'Asia/Bangkok', label: 'Bangkok Time – Asia/Bangkok' },
+  { id: 'Asia/Jakarta', label: 'Jakarta Time – Asia/Jakarta' },
+  { id: 'Australia/Sydney', label: 'Australian Eastern Time (AET) – Australia/Sydney' },
+  { id: 'Australia/Perth', label: 'Australian Western Time (AWT) – Australia/Perth' },
+  { id: 'Pacific/Auckland', label: 'New Zealand Time – Pacific/Auckland' },
+  { id: 'America/Sao_Paulo', label: 'Brazil Time (BRT) – America/Sao_Paulo' },
+  { id: 'America/Argentina/Buenos_Aires', label: 'Argentina Time – America/Argentina/Buenos_Aires' },
+  { id: 'America/Santiago', label: 'Chile Time – America/Santiago' },
+  { id: 'Asia/Dubai', label: 'Dubai Time – Asia/Dubai' },
+  { id: 'Africa/Johannesburg', label: 'South Africa Time – Africa/Johannesburg' },
+  { id: 'Africa/Lagos', label: 'Nigeria Time – Africa/Lagos' },
+];
+
+const CALENDAR_TZ_STORAGE_KEY = 'calendarTimezone';
+
+function getCalendarDisplayTimezone(serverTimezone) {
+  try {
+    const stored = localStorage.getItem(CALENDAR_TZ_STORAGE_KEY);
+    if (stored && CALENDAR_TIMEZONES.some((z) => z.id === stored)) return stored;
+  } catch (_) {}
+  return serverTimezone || 'America/New_York';
+}
+
+/** Return YYYY-MM-DD for the given ISO date string in the given timezone (for grouping by day). */
+function getScheduledDateKey(isoString, tz) {
+  if (!isoString || !tz) return null;
+  try {
+    const scheduled = new Date(isoString);
+    const dateFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+    const dateParts = dateFormatter.formatToParts(scheduled);
+    const get = (type) => (dateParts.find((p) => p.type === type) || {}).value || '';
+    return get('year') + '-' + get('month') + '-' + get('day');
+  } catch (_) {
+    return null;
+  }
+}
+
+function formatScheduledAtInTz(isoString, tz) {
+  if (!isoString || !tz) return null;
+  try {
+    const scheduled = new Date(isoString);
+    const dateFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+    const timeFormatter = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true });
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const dateParts = dateFormatter.formatToParts(scheduled);
+    const get = (type) => (dateParts.find((p) => p.type === type) || {}).value || '';
+    const month = get('month');
+    const day = get('day');
+    const year = get('year');
+    const shortDate = month + '/' + day;
+    const now = new Date();
+    const todayStr = dateFormatter.format(now);
+    const scheduledDateStr = dateFormatter.format(scheduled);
+    const tomorrow = new Date(now.getTime() + 86400000);
+    const tomorrowStr = dateFormatter.format(tomorrow);
+    let dateLabel;
+    if (scheduledDateStr === todayStr) dateLabel = 'Today (' + shortDate + ')';
+    else if (scheduledDateStr === tomorrowStr) dateLabel = 'Tomorrow (' + shortDate + ')';
+    else {
+      const dowFormatter = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long' });
+      const weekdayInTz = dowFormatter.format(scheduled);
+      const weekEnd = new Date(now.getTime() + 6 * 86400000);
+      const weekEndStr = dateFormatter.format(weekEnd);
+      if (scheduledDateStr <= weekEndStr) dateLabel = weekdayInTz + ' (' + shortDate + ')';
+      else dateLabel = year + '-' + month + '-' + day;
+    }
+    const timeLabel = timeFormatter.format(scheduled);
+    return { dateLabel, timeLabel };
+  } catch (_) {
+    return null;
+  }
+}
+
+/** Get YYYY-MM-DD for "today" in the given timezone. */
+function getTodayDateStringInTz(tz) {
+  if (!tz) return null;
+  try {
+    const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+    const parts = formatter.formatToParts(new Date());
+    const get = (type) => (parts.find((p) => p.type === type) || {}).value || '';
+    const y = get('year');
+    const mo = get('month').padStart(2, '0');
+    const d = get('day').padStart(2, '0');
+    return `${y}-${mo}-${d}`;
+  } catch (_) {
+    return null;
+  }
+}
+
+/** Given (dateStr, timeStr "HH:mm", tz), return a Date for that moment, or null. */
+function getDateForTimeInTz(dateStr, timeStr, tz) {
+  if (!dateStr || !timeStr || !tz) return null;
+  try {
+    const [y, mo, d] = dateStr.split('-').map(Number);
+    const [h, min] = timeStr.split(':').map(Number);
+    const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+    for (let utcHour = -12; utcHour <= 36; utcHour++) {
+      const date = new Date(Date.UTC(y, mo - 1, d, utcHour, min || 0, 0));
+      const parts = formatter.formatToParts(date);
+      const get = (type) => (parts.find((p) => p.type === type) || {}).value || '';
+      const fd = get('day').padStart(2, '0');
+      const fmo = get('month').padStart(2, '0');
+      const fy = get('year');
+      const fh = get('hour').padStart(2, '0');
+      const fmin = get('minute').padStart(2, '0');
+      if (fy === String(y) && fmo === String(mo).padStart(2, '0') && fd === String(d).padStart(2, '0') && fh === String(h).padStart(2, '0') && fmin === String(min || 0).padStart(2, '0')) return date;
+    }
+  } catch (_) {}
+  return null;
+}
+
+/** Convert a time from server TZ to user TZ; returns "HH:mm" (24h) for use in time inputs. */
+function convertTimeForDisplay(serverTz, userTz, timeStr) {
+  if (!serverTz || !userTz || !timeStr) return timeStr;
+  const dateStr = getTodayDateStringInTz(serverTz);
+  if (!dateStr) return timeStr;
+  const date = getDateForTimeInTz(dateStr, timeStr, serverTz);
+  if (!date) return timeStr;
+  try {
+    const formatter = new Intl.DateTimeFormat('en-GB', { timeZone: userTz, hour: '2-digit', minute: '2-digit', hour12: false });
+    const parts = formatter.formatToParts(date);
+    const get = (type) => (parts.find((p) => p.type === type) || {}).value || '';
+    return `${get('hour').padStart(2, '0')}:${get('minute').padStart(2, '0')}`;
+  } catch (_) {
+    return timeStr;
+  }
+}
+
+/** Convert a time from user TZ to server TZ; returns "HH:mm" (24h) for sending to API. */
+function convertTimeToServer(userTz, serverTz, timeStr) {
+  if (!userTz || !serverTz || !timeStr) return timeStr;
+  const dateStr = getTodayDateStringInTz(userTz);
+  if (!dateStr) return timeStr;
+  const date = getDateForTimeInTz(dateStr, timeStr, userTz);
+  if (!date) return timeStr;
+  try {
+    const formatter = new Intl.DateTimeFormat('en-GB', { timeZone: serverTz, hour: '2-digit', minute: '2-digit', hour12: false });
+    const parts = formatter.formatToParts(date);
+    const get = (type) => (parts.find((p) => p.type === type) || {}).value || '';
+    return `${get('hour').padStart(2, '0')}:${get('minute').padStart(2, '0')}`;
+  } catch (_) {
+    return timeStr;
+  }
+}
+
 function setBreadcrumb(route, project, campaign, folderNum) {
   const el = document.getElementById('breadcrumb');
   if (el) el.textContent = '';
@@ -873,12 +1138,159 @@ const AVAILABLE_FONTS = [
 // --- Views ---
 function renderDashboard() {
   setBreadcrumb({ view: 'dashboard' });
+  Promise.all([apiAllCampaigns()]).then(([campaigns]) => {
+    const main = document.getElementById('main');
+    const timeFrames = [
+      { id: '24h', label: '24 hours' },
+      { id: '7d', label: '7 days' },
+      { id: '30d', label: '30 days' },
+      { id: '6mo', label: '6 months' },
+      { id: '1y', label: '1 year' },
+      { id: 'all', label: 'All time' },
+    ];
+    const campaignsList = Array.isArray(campaigns) ? campaigns : [];
+    const scopeOptions = '<option value="">All pages</option>' + campaignsList.map((c) => `<option value="${escapeHtml(String(c.id))}">${escapeHtml(c.name || 'Campaign ' + c.id)}</option>`).join('');
+    let selectedChartMetric = 'views';
+    const chartMetricLabels = { views: 'Views over time', followers: 'Followers over time', likes: 'Likes over time', comments: 'Comments over time', shares: 'Shares over time' };
+    main.innerHTML = `
+      <section class="card analytics-card">
+        <h1 class="dashboard-title">Analytics</h1>
+        <p class="hint analytics-hint">TikTok metrics across your pages. Data will appear here once the TikTok API is connected. This is a mock UI.</p>
+        <div class="analytics-controls">
+          <div class="analytics-control-group">
+            <label class="field">
+              <span>Time frame</span>
+              <select id="analyticsTimeFrame" class="field-select">
+                ${timeFrames.map((t) => `<option value="${t.id}">${escapeHtml(t.label)}</option>`).join('')}
+              </select>
+            </label>
+          </div>
+          <div class="analytics-control-group">
+            <label class="field">
+              <span>Scope</span>
+              <select id="analyticsScope" class="field-select">
+                ${scopeOptions}
+              </select>
+            </label>
+            <p class="hint">All pages = combined metrics. Select a campaign to see metrics for posts affiliated with that campaign only.</p>
+          </div>
+        </div>
+        <div class="analytics-chart-wrap" id="analyticsChartWrap">
+          <h2 class="analytics-chart-title" id="analyticsChartTitle">Views over time</h2>
+          <div class="analytics-chart-inner">
+            <svg class="analytics-line-chart" id="analyticsLineChart" viewBox="0 0 400 180" preserveAspectRatio="none">
+              <defs>
+                <linearGradient id="analyticsChartGradient" x1="0" y1="1" x2="0" y2="0">
+                  <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.15"/>
+                  <stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/>
+                </linearGradient>
+              </defs>
+              <path id="analyticsChartArea" fill="url(#analyticsChartGradient)" stroke="none"/>
+              <polyline id="analyticsChartLine" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div class="analytics-chart-labels" id="analyticsChartLabels"></div>
+        </div>
+        <div class="analytics-metrics" id="analyticsMetrics">
+          <button type="button" class="analytics-metric analytics-metric-btn analytics-metric-selected" data-chart-metric="views" id="analyticsMetricViews">
+            <span class="analytics-metric-value" id="analyticsViews">—</span>
+            <span class="analytics-metric-label">Total views</span>
+          </button>
+          <button type="button" class="analytics-metric analytics-metric-btn" data-chart-metric="followers" id="analyticsMetricFollowers">
+            <span class="analytics-metric-value" id="analyticsFollowers">—</span>
+            <span class="analytics-metric-label">Total followers</span>
+          </button>
+          <button type="button" class="analytics-metric analytics-metric-btn" data-chart-metric="likes" id="analyticsMetricLikes">
+            <span class="analytics-metric-value" id="analyticsLikes">—</span>
+            <span class="analytics-metric-label">Total likes</span>
+          </button>
+          <button type="button" class="analytics-metric analytics-metric-btn" data-chart-metric="comments" id="analyticsMetricComments">
+            <span class="analytics-metric-value" id="analyticsComments">—</span>
+            <span class="analytics-metric-label">Total comments</span>
+          </button>
+          <button type="button" class="analytics-metric analytics-metric-btn" data-chart-metric="shares" id="analyticsMetricShares">
+            <span class="analytics-metric-value" id="analyticsShares">—</span>
+            <span class="analytics-metric-label">Total shares</span>
+          </button>
+        </div>
+        <p class="hint analytics-mock-note" id="analyticsScopeLabel">Showing mock data for all pages.</p>
+      </section>
+    `;
+    function formatMockValue() {
+      return '—';
+    }
+    function getMockChartPoints(metric) {
+      const count = 12;
+      const points = [];
+      const seed = (metric || 'views').split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+      let y = 80 + (seed % 40);
+      for (let i = 0; i < count; i++) {
+        const r = (seed * (i + 1) * 17) % 100 / 100;
+        y = Math.max(20, Math.min(160, y + (r - 0.45) * 28));
+        points.push({ x: (i / (count - 1)) * 100, y: 100 - (y / 180) * 100 });
+      }
+      return points;
+    }
+    function updateChart() {
+      const titleEl = document.getElementById('analyticsChartTitle');
+      if (titleEl) titleEl.textContent = chartMetricLabels[selectedChartMetric] || 'Views over time';
+      const svg = document.getElementById('analyticsLineChart');
+      const areaPath = document.getElementById('analyticsChartArea');
+      const lineEl = document.getElementById('analyticsChartLine');
+      const labelsEl = document.getElementById('analyticsChartLabels');
+      if (!svg || !areaPath || !lineEl) return;
+      const w = 400;
+      const h = 180;
+      const padding = { top: 12, right: 12, bottom: 8, left: 12 };
+      const chartW = w - padding.left - padding.right;
+      const chartH = h - padding.top - padding.bottom;
+      const points = getMockChartPoints(selectedChartMetric);
+      const xs = points.map((p) => padding.left + (p.x / 100) * chartW);
+      const ys = points.map((p) => padding.top + (1 - p.y / 100) * chartH);
+      const linePoints = xs.map((x, i) => `${x},${ys[i]}`).join(' ');
+      lineEl.setAttribute('points', linePoints);
+      const areaPoints = `${padding.left},${padding.top + chartH} ${xs.map((x, i) => `${x},${ys[i]}`).join(' ')} ${padding.left + chartW},${padding.top + chartH}`;
+      areaPath.setAttribute('d', `M ${areaPoints} Z`);
+      const timeFrame = document.getElementById('analyticsTimeFrame')?.value || '7d';
+      const labels = timeFrame === '24h' ? ['12a', '4a', '8a', '12p', '4p', '8p'] : timeFrame === '7d' ? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] : ['W1', 'W2', 'W3', 'W4'];
+      if (labelsEl) labelsEl.innerHTML = labels.map((l) => `<span class="analytics-chart-label">${escapeHtml(l)}</span>`).join('');
+    }
+    function updateMockMetrics() {
+      const scopeSelect = document.getElementById('analyticsScope');
+      const scopeLabel = document.getElementById('analyticsScopeLabel');
+      const scope = scopeSelect && scopeSelect.value ? scopeSelect.value : '';
+      const scopeName = scope ? (campaignsList.find((c) => String(c.id) === scope)?.name || 'Campaign') : 'all pages';
+      if (scopeLabel) scopeLabel.textContent = scope ? `Showing mock data for campaign: ${scopeName}.` : 'Showing mock data for all pages.';
+      ['analyticsViews', 'analyticsFollowers', 'analyticsLikes', 'analyticsComments', 'analyticsShares'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = formatMockValue();
+      });
+      updateChart();
+    }
+    function setSelectedMetric(metric) {
+      selectedChartMetric = metric;
+      main.querySelectorAll('.analytics-metric-btn').forEach((btn) => {
+        btn.classList.toggle('analytics-metric-selected', btn.dataset.chartMetric === metric);
+      });
+      updateChart();
+    }
+    main.querySelectorAll('.analytics-metric-btn').forEach((btn) => {
+      btn.addEventListener('click', () => setSelectedMetric(btn.dataset.chartMetric || 'views'));
+    });
+    updateMockMetrics();
+    main.querySelector('#analyticsTimeFrame')?.addEventListener('change', updateMockMetrics);
+    main.querySelector('#analyticsScope')?.addEventListener('change', updateMockMetrics);
+  });
+}
+
+function renderPages() {
+  setBreadcrumb({ view: 'pages' });
   Promise.all([apiProjects(), apiAllCampaigns()]).then(([projects, campaigns]) => {
     const main = document.getElementById('main');
     main.innerHTML = `
       <section class="card dashboard-card">
         <div class="card-header dashboard-header">
-          <h1 class="dashboard-title">Home Screen</h1>
+          <h1 class="dashboard-title">Pages</h1>
         </div>
         <div class="pages-two-column">
           <div class="pages-column">
@@ -944,11 +1356,101 @@ function renderDashboard() {
   });
 }
 
+function renderRecurringPages() {
+  setBreadcrumb({ view: 'recurringPages' });
+  Promise.all([apiRecurringPagesGet(), apiProjects()]).then(([recurringIds, projects]) => {
+    const main = document.getElementById('main');
+    const recurringProjects = (recurringIds || []).map((id) => projects.find((p) => String(p.id) === String(id))).filter(Boolean);
+    const availableToAdd = projects.filter((p) => !recurringIds || !recurringIds.includes(p.id));
+    main.innerHTML = `
+      <section class="card dashboard-card">
+        <div class="card-header dashboard-header">
+          <h1 class="dashboard-title">Recurring Pages</h1>
+          <p class="hint" style="margin:8px 0 0 0;">Add pages here to create and manage post types for them. Click a page to add content and schedule.</p>
+        </div>
+        <div class="actions" style="margin-bottom:1rem;">
+          <button type="button" class="btn btn-primary" id="addRecurringPageBtn">Add page</button>
+        </div>
+        <div id="recurringPagesGrid" class="project-circles recurring-pages-grid"></div>
+        <p id="recurringPagesEmpty" class="empty" style="display:none;">No recurring pages yet. Click "Add page" to select a page to add.</p>
+      </section>
+      <div id="addRecurringPageModal" class="modal-overlay" hidden>
+        <div class="modal" style="max-width:360px;">
+          <h3 style="margin:0 0 1rem 0;">Add a recurring page</h3>
+          <p class="hint" style="margin-bottom:12px;">Select one page to add. You can add more after.</p>
+          <label class="field" style="margin-bottom:1rem;">
+            <span class="field-label">Page</span>
+            <select id="addRecurringPageSelect" class="field-select"></select>
+          </label>
+          <div style="display:flex;gap:8px;justify-content:flex-end;">
+            <button type="button" class="btn btn-ghost" id="addRecurringPageCancel">Cancel</button>
+            <button type="button" class="btn btn-primary" id="addRecurringPageConfirm">Add</button>
+          </div>
+        </div>
+      </div>
+    `;
+    const grid = document.getElementById('recurringPagesGrid');
+    const emptyEl = document.getElementById('recurringPagesEmpty');
+    if (recurringProjects.length === 0) {
+      grid.innerHTML = '';
+      if (emptyEl) emptyEl.style.display = 'block';
+    } else {
+      if (emptyEl) emptyEl.style.display = 'none';
+      grid.innerHTML = recurringProjects.map((p) => {
+        const initial = (p.name || 'P').charAt(0).toUpperCase();
+        const img = p.hasAvatar ? `<img src="${projectAvatarUrl(p.id)}" alt="" />` : `<span class="project-circle-initial">${initial}</span>`;
+        return `<div class="project-circle-wrap" data-project-id="${p.id}">
+          <a href="#/recurring-pages/${p.id}" class="project-circle" title="${escapeHtml(p.name)}">${img}</a>
+          <span class="project-circle-name">${escapeHtml(p.name)}</span>
+          <button type="button" class="project-circle-delete" data-action="remove-recurring" data-id="${p.id}" aria-label="Remove from recurring">Remove</button>
+        </div>`;
+      }).join('');
+    }
+    grid.querySelectorAll('[data-action="remove-recurring"]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        showConfirm('Remove this page from Recurring Pages? Post types will not be deleted.').then((ok) => {
+          if (!ok) return;
+          apiRecurringPagesRemove(btn.dataset.id).then(() => render());
+        });
+      };
+    });
+    const addBtn = document.getElementById('addRecurringPageBtn');
+    const modal = document.getElementById('addRecurringPageModal');
+    const selectEl = document.getElementById('addRecurringPageSelect');
+    const cancelBtn = document.getElementById('addRecurringPageCancel');
+    const confirmBtn = document.getElementById('addRecurringPageConfirm');
+    if (addBtn && modal && selectEl) {
+      addBtn.onclick = () => {
+        selectEl.innerHTML = availableToAdd.length
+          ? availableToAdd.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')
+          : '<option value="">No pages available</option>';
+        selectEl.disabled = availableToAdd.length === 0;
+        modal.hidden = false;
+      };
+      cancelBtn.onclick = () => { modal.hidden = true; };
+      confirmBtn.onclick = () => {
+        const id = selectEl.value && selectEl.value.trim();
+        if (!id || availableToAdd.length === 0) return;
+        apiRecurringPagesAdd(id).then(() => {
+          modal.hidden = true;
+          render();
+        }).catch((err) => showAlert(err.message || 'Failed to add'));
+      };
+      modal.onclick = (e) => { if (e.target.id === 'addRecurringPageModal') modal.hidden = true; };
+      modal.querySelector('.modal')?.addEventListener('click', (e) => e.stopPropagation());
+    }
+  }).catch((err) => {
+    document.getElementById('main').innerHTML = `<section class="card"><p class="back-link-wrap"><a href="#/recurring-pages" class="nav-link">← Back to Recurring Pages</a></p><p>Failed to load.</p></section>`;
+  });
+}
+
 function renderProject(projectId) {
   const pid = projectId;
   Promise.all([apiProject(pid), apiCampaigns(pid)]).then(([project, campaigns]) => {
     if (!project) {
-      document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap"><a href="#/" class="nav-link">← Back to Home Screen</a></p><p>Page not found.</p></section>';
+      document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap"><a href="#/pages" class="nav-link">← Back to Pages</a></p><p>Page not found.</p></section>';
       setBreadcrumb({ view: 'project', projectId: pid }, null, null);
       return;
     }
@@ -957,7 +1459,7 @@ function renderProject(projectId) {
     const avatarImg = project.hasAvatar ? `<img src="${projectAvatarUrl(project.id)}" alt="" class="project-avatar-img" />` : '<span class="project-avatar-placeholder">No photo</span>';
     main.innerHTML = `
       <section class="card project-card">
-        <p class="back-link-wrap"><a href="#/" class="nav-link">← Back to Home Screen</a></p>
+        <p class="back-link-wrap"><a href="#/pages" class="nav-link">← Back to Pages</a></p>
         <div class="card-header">
           <h1>${escapeHtml(project.name)}</h1>
         </div>
@@ -993,18 +1495,13 @@ function renderProject(projectId) {
           </div>
           <p class="hint">Required for auto-posting. Get from Blotato: GET /v2/users/me/accounts?platform=tiktok</p>
         </div>
-        <div class="field" style="margin-top:1.5rem;padding-top:1.5rem;border-top:1px solid var(--border);">
-          <h2 style="margin:0 0 8px 0;font-size:1.1rem;">Used folder</h2>
-          <p class="hint" style="margin-bottom:12px;">Images moved here after being sent to Blotato. Download within 14 days or they will be deleted.</p>
-          <a href="#/project/${project.id}/used" class="btn btn-secondary">View used images</a>
-        </div>
         <div class="project-content-section">
-          <h2 style="margin:0 0 8px 0;font-size:1.1rem;">${(project.pageType || 'recurring') === 'recurring' ? 'Your content' : 'Campaigns'}</h2>
-          <p class="hint" style="margin-bottom:12px;">${(project.pageType || 'recurring') === 'recurring' ? 'Upload content, set a schedule, and run—this page can post on its own. No campaign required. Or join a campaign to post with other pages.' : 'Campaigns this page belongs to.'}</p>
+          <h2 style="margin:0 0 8px 0;font-size:1.1rem;">${(project.pageType || 'recurring') === 'recurring' ? 'Campaigns' : 'Campaigns'}</h2>
+          <p class="hint" style="margin-bottom:12px;">${(project.pageType || 'recurring') === 'recurring' ? 'To create and schedule posts for this page, add it in Recurring Pages.' : 'Campaigns this page belongs to.'}</p>
         </div>
+        <div id="recurringPagesCta" style="display:none;margin-bottom:1rem;"><button type="button" class="btn btn-secondary" id="addPageToRecurringPagesBtn">Add this page in Recurring Pages</button></div>
         <div class="campaign-list" id="campaignList"></div>
         <div class="actions" style="flex-wrap:wrap;gap:8px;">
-          ${(project.pageType || 'recurring') === 'recurring' ? '<button type="button" class="btn btn-primary" id="createPostTypeBtn">Create post type</button>' : ''}
           <button type="button" class="btn ${(project.pageType || 'recurring') === 'recurring' ? 'btn-secondary' : 'btn-primary'}" id="joinCampaignBtn">Join campaign</button>
         </div>
       </section>
@@ -1068,12 +1565,15 @@ function renderProject(projectId) {
     }
     const list = document.getElementById('campaignList');
     const isRecurring = (project.pageType || 'recurring') === 'recurring';
-    if (!campaigns.length) {
+    const ctaEl = document.getElementById('recurringPagesCta');
+    if (ctaEl) ctaEl.style.display = isRecurring ? 'block' : 'none';
+    const campaignsToShow = isRecurring ? campaigns.filter((c) => c.name !== 'Recurring posts') : campaigns;
+    if (!campaignsToShow.length) {
       list.innerHTML = isRecurring
-        ? '<p class="empty">Create a post type to add content and run on your own schedule—no campaign needed. Or join a campaign to post with other pages.</p>'
+        ? '<p class="empty">No campaigns yet. To create post types for this page, add it in Recurring Pages. Or join a campaign to post with other pages.</p>'
         : '<p class="empty">No campaigns yet. Join a campaign to get started.</p>';
     } else {
-      const sorted = [...campaigns].sort((a, b) => {
+      const sorted = [...campaignsToShow].sort((a, b) => {
         const da = a.releaseDate || '';
         const db = b.releaseDate || '';
         if (!da && !db) return 0;
@@ -1102,24 +1602,8 @@ function renderProject(projectId) {
       `;
       }).join('');
     }
-    const createPostTypeBtn = document.getElementById('createPostTypeBtn');
-    if (createPostTypeBtn) {
-      createPostTypeBtn.onclick = () => {
-        // Post type lives in the page profile; we still use a Recurring posts campaign on the backend.
-        const pageContentCampaign = campaigns.find((c) => c.name === 'Recurring posts');
-        const ensureCampaign = pageContentCampaign
-          ? Promise.resolve(pageContentCampaign)
-          : apiCreateCampaign(project.id, 'Recurring posts');
-        ensureCampaign.then((campaign) => {
-          return apiCreatePostType(project.id, campaign.id, 'New post type', 'video').then((c) => {
-            const pts = c.postTypes || [];
-            const newId = pts.length ? pts[pts.length - 1].id : null;
-            if (newId) location.hash = `#/project/${project.id}/content/${encodeURIComponent(newId)}`;
-            render();
-          });
-        }).catch((err) => showAlert(err.message || 'Failed to create'));
-      };
-    }
+    const addToRecurringBtn = document.getElementById('addPageToRecurringPagesBtn');
+    if (addToRecurringBtn) addToRecurringBtn.onclick = () => { location.hash = '#/recurring-pages'; };
     document.getElementById('joinCampaignBtn').onclick = () => {
       apiAllCampaigns().then((all) => {
         const joinable = all.filter((c) => {
@@ -1163,7 +1647,7 @@ function openFolderModal(projectId, campaignId, folderNum, folderLabel, onClose)
         return `
         <div class="folder-modal-photo">
           <img data-src="${folderImageUrl(projectId, campaignId, folderNum, filename)}" alt="" loading="lazy" />
-          ${usageCount > 0 ? `<span class="folder-photo-usage-badge" title="Times used in runs">${usageCount}</span>` : ''}
+          <span class="folder-photo-usage-badge" title="Times used in runs">${usageCount}</span>
           <button type="button" class="folder-modal-delete" data-filename="${escapeHtml(filename)}">×</button>
         </div>
       `}).join('');
@@ -1195,58 +1679,6 @@ function openFolderModal(projectId, campaignId, folderNum, folderLabel, onClose)
   modal.onclick = (e) => { if (e.target.id === 'folderModal') close(); };
 }
 
-function renderProjectUsed(projectId) {
-  const pid = projectId;
-  Promise.all([apiProject(pid), apiProjectUsed(pid)]).then(([project, data]) => {
-    if (!project) {
-      document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap"><a href="#/" class="nav-link">← Back to Home Screen</a></p><p>Page not found.</p></section>';
-      return;
-    }
-    setBreadcrumb({ view: 'projectUsed', projectId: pid }, project, null);
-    const main = document.getElementById('main');
-    const items = data.items || [];
-    main.innerHTML = `
-      <section class="card">
-        <p class="back-link-wrap"><a href="#/project/${pid}" class="nav-link">← Back to ${escapeHtml(project.name)}</a></p>
-        <h1>Used images</h1>
-        <p class="hint">Images moved here after being sent to Blotato. Download within 14 days or they will be deleted.</p>
-        <div id="usedImagesContent">
-          ${items.length ? `
-            <div class="used-images-grid" id="usedImagesGrid"></div>
-          ` : '<p class="empty">No used images yet. Images move here after Blotato posts.</p>'}
-        </div>
-      </section>
-    `;
-    if (items.length) {
-      const grid = document.getElementById('usedImagesGrid');
-      if (grid) {
-        grid.innerHTML = items.map((it) => {
-          const exp = new Date(it.expiresAt);
-          const daysLeft = Math.max(0, Math.ceil((exp - Date.now()) / (24 * 60 * 60 * 1000)));
-          const imgUrl = projectUsedImageUrl(pid, it.filename);
-          return `
-            <div class="used-image-card" style="background:var(--surface);border-radius:var(--radius-md);overflow:hidden;border:1px solid var(--border);">
-              <div style="aspect-ratio:9/16;overflow:hidden;">
-                <img data-src="${imgUrl}" alt="" loading="lazy" style="width:100%;height:100%;object-fit:cover;" />
-              </div>
-              <div style="padding:10px;font-size:12px;color:var(--text-muted);">Campaign ${it.campaignId} · Folder ${it.folderNum} · ${daysLeft}d left</div>
-              <a href="#" data-href="${imgUrl}" data-download="${escapeHtml(it.originalName)}" class="btn btn-secondary" style="margin:0 10px 10px;">Save to Finder</a>
-            </div>
-          `;
-        }).join('');
-        grid.querySelectorAll('img[data-src]').forEach((img) => {
-          withAuthQuery(img.dataset.src).then((url) => { img.src = url; img.removeAttribute('data-src'); });
-        });
-        grid.querySelectorAll('a[data-href]').forEach((a) => {
-          withAuthQuery(a.dataset.href).then((url) => { a.href = url; a.download = a.dataset.download || ''; a.removeAttribute('data-href'); a.removeAttribute('data-download'); });
-        });
-      }
-    }
-  }).catch(() => {
-    document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap"><a href="#/" class="nav-link">← Back to Home Screen</a></p><p>Could not load used images.</p></section>';
-  });
-}
-
 function renderMediaTypeSelector(pid, cid, ptId, project, campaign) {
   const main = document.getElementById('main');
   const title = campaignDisplayTitle(project, campaign);
@@ -1276,11 +1708,14 @@ function renderMediaTypeSelector(pid, cid, ptId, project, campaign) {
   };
 }
 
-function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, latest) {
+function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, latest, config) {
   let campaignData = campaign;
+  const serverTz = (config && config.timezone) || 'America/New_York';
+  const userTz = getCalendarDisplayTimezone(serverTz);
+  const rawTimes = campaign.scheduleTimes || ['10:00', '13:00', '16:00'];
+  const times = rawTimes.map((t) => convertTimeForDisplay(serverTz, userTz, t || '10:00'));
   const folders = foldersData.folders || {};
   const folderCount = 2;
-  const times = campaign.scheduleTimes || ['10:00', '13:00', '16:00'];
   const scheduleStart = campaign.scheduleStartDate || '';
   const scheduleEnd = campaign.scheduleEndDate || '';
   const daysOfWeek = campaign.scheduleDaysOfWeek ?? [0, 1, 2, 3, 4, 5, 6];
@@ -1324,8 +1759,8 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
       </div>
     </section>
     <section class="card">
-      <h2>Video folders</h2>
-      <p class="hint">Add videos to Priority (used first) or Fallback (used when Priority is empty). One video is picked per run and published via Blotato.</p>
+      <h2>Videos</h2>
+      <p class="hint">Add videos the same way as video (add text): upload to Priority (used first) or Fallback (used when Priority is empty). One video with the lowest use number is picked per run; the number on each shows how many times it has been used. No on-screen text is added. Max 50 MB per video.</p>
       <div class="folders" id="foldersContainer">${videoFolders}</div>
     </section>
     <section class="card">
@@ -1350,7 +1785,7 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
     </section>
     <section class="card">
       <h2>Run now & webContentUrls</h2>
-      <p class="hint">Run once to pick a video and generate its URL. The video is published via Blotato.</p>
+      <p class="hint">Run once to pick the least-used video (Priority, then Fallback) and generate its URL. The video is published via Blotato.</p>
       <label class="checkbox-field" style="margin-bottom:12px;"><input type="checkbox" id="sendAsDraft" ${campaign.sendAsDraft ? 'checked' : ''} /><span>Send to Blotato as draft</span></label>
       <p class="hint" style="margin-top:-8px;margin-bottom:12px;">When checked, the post goes to TikTok drafts (mobile app) instead of publishing immediately.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -1372,6 +1807,14 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
         const el = document.getElementById(`count${i}`);
         const list = fol[`folder${i}`] || [];
         if (el) el.textContent = `${list.length} video${list.length !== 1 ? 's' : ''}`;
+        const thumbsEl = document.getElementById(`dropzoneThumbs${i}`);
+        if (thumbsEl) {
+          thumbsEl.innerHTML = list.map((item) => {
+            const filename = typeof item === 'string' ? item : (item && item.filename) || '';
+            const usageCount = typeof item === 'object' && item && 'usageCount' in item ? item.usageCount : 0;
+            return `<div class="dropzone-thumb" title="${escapeHtml(filename)}"><span class="dropzone-thumb-media dropzone-thumb-video">vid</span><span class="folder-photo-usage-badge">${usageCount}</span></div>`;
+          }).join('');
+        }
       }
     });
   }
@@ -1389,6 +1832,7 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
     }
     if (input) input.onchange = (e) => { const files = e.target.files; if (files?.length) apiCampaignUpload(pid, cid, num, files, ptId, 'video').then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed')); };
   }
+  updateFolderCounts();
   document.getElementById('deployed').onchange = (e) => apiUpdateCampaign(pid, cid, { ...campaignData, deployed: e.target.checked }, ptId).then((c) => { campaignData = c; });
   const postTypeHeaderEl = document.getElementById('postTypeHeader');
   if (postTypeHeaderEl) postTypeHeaderEl.ondblclick = () => {
@@ -1418,7 +1862,7 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
   };
   document.getElementById('removeScheduleTime').onclick = () => { const rows = scheduleTimesEl.querySelectorAll('.time-row'); if (rows.length > 1) rows[rows.length - 1].remove(); };
   document.getElementById('saveCampaign').onclick = () => {
-    const timesArr = Array.from(document.querySelectorAll('.time-input')).map((i) => i.value || '10:00');
+    const timesArr = Array.from(document.querySelectorAll('.time-input')).map((i) => i.value || '10:00').map((t) => convertTimeToServer(userTz, serverTz, t));
     const daysChecked = Array.from(document.querySelectorAll('.schedule-day:checked')).map((cb) => parseInt(cb.dataset.day, 10));
     apiUpdateCampaign(pid, cid, { ...campaignData, scheduleEnabled: document.getElementById('scheduleEnabled').checked, scheduleTimes: timesArr, scheduleStartDate: document.getElementById('scheduleStartDate')?.value || null, scheduleEndDate: document.getElementById('scheduleEndDate')?.value || null, scheduleDaysOfWeek: daysChecked }, ptId).then((c) => { campaignData = c; });
     const status = document.getElementById('runStatus');
@@ -1453,7 +1897,7 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
     status.textContent = 'Running…';
     status.className = 'run-status loading';
     const sendAsDraft = !!document.getElementById('sendAsDraft')?.checked;
-    apiUpdateCampaign(pid, cid, { ...campaignData, sendAsDraft }, ptId).then((c) => { campaignData = c; return apiCampaignRun(pid, cid, null, null, sendAsDraft, ptId); })
+    apiUpdateCampaign(pid, cid, { ...campaignData, sendAsDraft }, ptId).then((c) => { campaignData = c; return apiCampaignRun(pid, cid, null, null, sendAsDraft, false, ptId); })
       .then((data) => {
         if (data.error) throw new Error(data.error);
         let msg = `Done. ${(data.webContentUrls || []).length} URL(s) generated.`;
@@ -1468,12 +1912,15 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
   if ((latest.webContentUrls || []).length) showUrls(latest.webContentUrls, latest.webContentBase64 || []);
 }
 
-function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersData, latest) {
+function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersData, latest, config) {
   let campaignData = campaign;
+  const serverTz = (config && config.timezone) || 'America/New_York';
+  const userTz = getCalendarDisplayTimezone(serverTz);
+  const rawTimes = campaign.scheduleTimes || ['10:00', '13:00', '16:00'];
+  const times = rawTimes.map((t) => convertTimeForDisplay(serverTz, userTz, t || '10:00'));
   const folders = foldersData.folders || {};
   const folderCount = 1;
   const textOptionsPerFolder = campaign.textOptionsPerFolder || [[]];
-  const times = campaign.scheduleTimes || ['10:00', '13:00', '16:00'];
   const scheduleStart = campaign.scheduleStartDate || '';
   const scheduleEnd = campaign.scheduleEndDate || '';
   const daysOfWeek = campaign.scheduleDaysOfWeek ?? [0, 1, 2, 3, 4, 5, 6];
@@ -1481,6 +1928,8 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
   const list = folders.folder1 || [];
   const count = list.length;
   const ts = (campaign.textStylePerFolder && campaign.textStylePerFolder[0]) || campaign.textStyle || {};
+  const pt = (campaign.postTypes || []).find((p) => p.id === ptId);
+  const initialTextOverlayMode = (pt && pt.textPresetId) ? 'lyric' : 'onscreen';
   const campaignAvatarSection = `<div class="campaign-header-avatar-inner" id="campaignHeaderAvatarInner"><img src="${campaignAvatarUrl(cid)}" alt="" class="campaign-avatar-img" id="campaignAvatarImg" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" id="campaignAvatarPlaceholder" style="display:none;">${(campaign.name || 'C').charAt(0).toUpperCase()}</span></div><input type="file" accept="image/*" id="campaignAvatarInput" hidden />`;
   const pageIndicator = project.hasAvatar ? `<img src="${projectAvatarUrl(project.id)}" alt="" class="page-indicator-avatar" />` : `<span class="page-indicator-initial">${(project.name || 'P').charAt(0).toUpperCase()}</span>`;
   const main = document.getElementById('main');
@@ -1507,8 +1956,8 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
       </div>
     </section>
     <section class="card">
-      <h2>Videos folder</h2>
-      <p class="hint">Upload videos here. One video is picked at random per run and combined with one random text option.</p>
+      <h2>Videos</h2>
+      <p class="hint">Upload videos here. One video with the lowest use number is picked per run (all get used before any is reused); the number on each shows how many times it has been used. Max 50 MB per video.</p>
       <div class="folders" id="foldersContainer">
         <div class="folder" data-folder="1">
           <div class="dropzone" id="dropzone1" data-folder-num="1">
@@ -1521,23 +1970,39 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
         </div>
       </div>
     </section>
-    <section class="card">
-      <h2>On-screen text options</h2>
-      <p class="hint">One line is chosen at random per run and overlaid on the video.</p>
-      <a href="${contentPostTypeLink(pid, cid, ptId, 'folder/1')}" class="btn btn-secondary btn-folder-text">Edit on-screen text options</a>
+    <section class="card" id="textOverlayCard">
+      <h2>Text overlay</h2>
+      <p class="hint">Choose how text appears on your videos: lyric overlay (moving text preset) or on-screen text (static text options).</p>
+      <div class="text-overlay-mode-buttons" role="group" aria-label="Text overlay type">
+        <button type="button" class="btn ${initialTextOverlayMode === 'lyric' ? 'btn-primary' : 'btn-secondary'}" id="textOverlayModeLyric">Lyric overlay preset</button>
+        <button type="button" class="btn ${initialTextOverlayMode === 'onscreen' ? 'btn-primary' : 'btn-secondary'}" id="textOverlayModeOnscreen">On-screen text</button>
+      </div>
+      <div id="textOverlayLyricPanel" class="text-overlay-panel" style="display:${initialTextOverlayMode === 'lyric' ? 'block' : 'none'};">
+        <label class="field">
+          <span>Preset</span>
+          <select id="textPresetSelect" class="field-select" style="max-width:320px;">
+            <option value="">Select a preset…</option>
+          </select>
+        </label>
+        <p class="hint">Use a moving-text preset from Settings → Text presets. The preview below shows the preset on your video.</p>
+      </div>
+      <div id="textOverlayOnscreenPanel" class="text-overlay-panel" style="display:${initialTextOverlayMode === 'onscreen' ? 'block' : 'none'};">
+        <p class="hint">One line from your text options is chosen per run and overlaid using the styling below.</p>
+        <a href="${contentPostTypeLink(pid, cid, ptId, 'folder/1')}" class="btn btn-secondary btn-folder-text">Edit on-screen text options</a>
+      </div>
     </section>
     <section class="card">
-      <h2>Text styling</h2>
-      <p class="hint">Position and style of the overlay text. Preview runs the full pipeline (picks a random video + text) so you can see the result.</p>
+      <h2 id="textStyleSectionTitle">${initialTextOverlayMode === 'lyric' ? 'Preview' : 'Text styling'}</h2>
+      <p class="hint" id="textStyleSectionHint">${initialTextOverlayMode === 'lyric' ? 'Preview shows your lyric preset on the video. Click Refresh preview to update.' : 'Position and style of the overlay text. The preview shows your on-screen text on the video. Click Refresh preview to update.'}</p>
       <div class="text-style-folders">
         <div class="text-style-folder-card text-style-folder-card-live" data-folder="1">
-          <h4 class="text-style-folder-title">Text overlay</h4>
+          <h4 class="text-style-folder-title" id="textStyleFolderTitle">${initialTextOverlayMode === 'lyric' ? 'Preview' : 'Text overlay'}</h4>
           <div class="text-style-folder-row">
-            <div class="text-style-settings-panel" data-folder="1">
+            <div class="text-style-settings-panel" data-folder="1" id="textStyleSettingsPanel" style="display:${initialTextOverlayMode === 'onscreen' ? 'block' : 'none'};">
               <div class="text-style-grid">
-                <label class="field"><span>X (%)</span><input type="number" data-folder="1" data-field="x" value="${(ts.x ?? 50)}" min="0" max="100" title="0 = center" /></label>
-                <label class="field"><span>Y (%)</span><input type="number" data-folder="1" data-field="y" value="${(ts.y ?? 92)}" min="0" max="100" title="0 = center" /></label>
-                <label class="field"><span>Size (px)</span><input type="number" data-folder="1" data-field="size" value="${(ts.fontSize != null && ts.fontSize >= 12 && ts.fontSize <= 200) ? Math.round(ts.fontSize) : Math.max(12, Math.min(200, Math.round(720 * (Number(ts.fontSize) || 0.06))))}" min="12" max="200" step="1" title="Font size in pixels" /></label>
+                <label class="field"><span>X (%)</span><input type="number" data-folder="1" data-field="x" value="${(ts.x === 50 || ts.x == null) ? 0 : ts.x}" min="0" max="100" title="0 = center" /></label>
+                <label class="field"><span>Y (%)</span><input type="number" data-folder="1" data-field="y" value="${(ts.y === 50 || ts.y == null) ? 0 : ts.y}" min="0" max="100" title="0 = center" /></label>
+                <label class="field"><span>Size (px)</span><input type="number" data-folder="1" data-field="size" value="${(ts.fontSize != null && ts.fontSize >= 12 && ts.fontSize <= 200) ? Math.round(ts.fontSize) : 60}" min="12" max="200" step="1" title="Font size in pixels" /></label>
                 <label class="field"><span>Font</span><select data-folder="1" data-field="font" class="field-select">${(() => { const current = ts.font || 'Arial, sans-serif'; const fonts = AVAILABLE_FONTS.includes(current) ? AVAILABLE_FONTS : [current, ...AVAILABLE_FONTS]; return fonts.map((font) => `<option value="${escapeHtml(font)}" ${current === font ? 'selected' : ''}>${escapeHtml(font)}</option>`).join(''); })()}</select></label>
                 <label class="field"><span>Color</span><input type="text" data-folder="1" data-field="color" value="${escapeHtml(ts.color || 'white')}" /></label>
                 <label class="field"><span>Stroke</span><input type="number" data-folder="1" data-field="strokeWidth" value="${(ts.strokeWidth ?? 2)}" min="0" max="10" step="0.5" /></label>
@@ -1556,7 +2021,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
           </div>
         </div>
       </div>
-      <button type="button" class="btn btn-secondary" id="saveTextStyle">Save text styles</button>
+      <button type="button" class="btn btn-secondary" id="saveTextStyle" style="display:${initialTextOverlayMode === 'onscreen' ? 'inline-block' : 'none'};">Save text styles</button>
     </section>
     <section class="card">
       <h2>Schedule</h2>
@@ -1612,8 +2077,17 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
       const list1 = fol.folder1 || [];
       const el = document.getElementById('count1');
       if (el) el.textContent = `${list1.length} video${list1.length !== 1 ? 's' : ''}`;
+      const thumbsEl = document.getElementById('dropzoneThumbs1');
+      if (thumbsEl) {
+        thumbsEl.innerHTML = list1.map((item) => {
+          const filename = typeof item === 'string' ? item : (item && item.filename) || '';
+          const usageCount = typeof item === 'object' && item && 'usageCount' in item ? item.usageCount : 0;
+          return `<div class="dropzone-thumb" title="${escapeHtml(filename)}"><span class="dropzone-thumb-media dropzone-thumb-video">vid</span><span class="folder-photo-usage-badge">${usageCount}</span></div>`;
+        }).join('');
+      }
     });
   }
+  updateFolderCounts();
 
   const dropzone = document.getElementById('dropzone1');
   const input = document.getElementById('input1');
@@ -1671,7 +2145,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
     rows[rows.length - 1].remove();
   };
   document.getElementById('saveCampaign').onclick = () => {
-    const timesArr = Array.from(document.querySelectorAll('.time-input')).map((i) => i.value || '10:00');
+    const timesArr = Array.from(document.querySelectorAll('.time-input')).map((i) => i.value || '10:00').map((t) => convertTimeToServer(userTz, serverTz, t));
     const daysChecked = Array.from(document.querySelectorAll('.schedule-day:checked')).map((cb) => parseInt(cb.dataset.day, 10));
     apiUpdateCampaign(pid, cid, {
       ...campaignData,
@@ -1689,10 +2163,10 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
 
   function getCurrentTextStylePerFolder() {
     const get = (field) => { const el = document.querySelector(`[data-folder="1"][data-field="${field}"]`); return el ? el.value : null; };
-    const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat(get('size')) || 48)));
+    const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat(get('size')) || 60)));
     return [{
-      x: parseFloat(get('x')) ?? 50,
-      y: parseFloat(get('y')) ?? 92,
+      x: parseFloat(get('x')) || 0,
+      y: parseFloat(get('y')) || 0,
       fontSize: sizePx,
       font: (get('font') || 'Arial, sans-serif').trim(),
       color: (get('color') || 'white').trim(),
@@ -1712,6 +2186,49 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
         if (status) { status.textContent = err.message || 'Failed to save'; status.className = 'run-status error'; }
         showAlert(err?.message || 'Failed to save text styles.');
       });
+  };
+
+  const presetSelect = document.getElementById('textPresetSelect');
+  if (presetSelect) {
+    apiTextPresets().then((presets) => {
+      presetSelect.innerHTML = '<option value="">Select a preset…</option>' + (Array.isArray(presets) ? presets.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name || p.id)}</option>`).join('') : '');
+      const pt = (campaignData.postTypes || []).find((p) => p.id === ptId);
+      if (pt && pt.textPresetId) presetSelect.value = pt.textPresetId;
+    }).catch(() => {});
+    presetSelect.onchange = () => {
+      const val = presetSelect.value || null;
+      apiUpdatePostType(pid, cid, ptId, { textPresetId: val }).then((c) => { campaignData = c; }).catch((err) => showAlert(err.message || 'Failed to update preset'));
+    };
+  }
+
+  function setTextOverlayMode(mode) {
+    const isLyric = mode === 'lyric';
+    const lyricBtn = document.getElementById('textOverlayModeLyric');
+    const onscreenBtn = document.getElementById('textOverlayModeOnscreen');
+    const lyricPanel = document.getElementById('textOverlayLyricPanel');
+    const onscreenPanel = document.getElementById('textOverlayOnscreenPanel');
+    const settingsPanel = document.getElementById('textStyleSettingsPanel');
+    const sectionTitle = document.getElementById('textStyleSectionTitle');
+    const sectionHint = document.getElementById('textStyleSectionHint');
+    const folderTitle = document.getElementById('textStyleFolderTitle');
+    if (lyricBtn) { lyricBtn.className = isLyric ? 'btn btn-primary' : 'btn btn-secondary'; }
+    if (onscreenBtn) { onscreenBtn.className = isLyric ? 'btn btn-secondary' : 'btn btn-primary'; }
+    if (lyricPanel) lyricPanel.style.display = isLyric ? 'block' : 'none';
+    if (onscreenPanel) onscreenPanel.style.display = isLyric ? 'none' : 'block';
+    if (settingsPanel) settingsPanel.style.display = isLyric ? 'none' : 'block';
+    if (sectionTitle) sectionTitle.textContent = isLyric ? 'Preview' : 'Text styling';
+    if (sectionHint) sectionHint.textContent = isLyric ? 'Preview shows your lyric preset on the video. Click Refresh preview to update.' : 'Position and style of the overlay text. The preview shows your on-screen text on the video. Click Refresh preview to update.';
+    if (folderTitle) folderTitle.textContent = isLyric ? 'Preview' : 'Text overlay';
+    const saveTextStyleBtn = document.getElementById('saveTextStyle');
+    if (saveTextStyleBtn) saveTextStyleBtn.style.display = isLyric ? 'none' : 'inline-block';
+  }
+  document.getElementById('textOverlayModeLyric').onclick = () => {
+    setTextOverlayMode('lyric');
+  };
+  document.getElementById('textOverlayModeOnscreen').onclick = () => {
+    apiUpdatePostType(pid, cid, ptId, { textPresetId: null }).then((c) => { campaignData = c; }).catch(() => {});
+    if (presetSelect) presetSelect.value = '';
+    setTextOverlayMode('onscreen');
   };
 
   const videoEl = main.querySelector('.text-style-preview-video[data-folder="1"]');
@@ -1775,7 +2292,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
     const textOptionsPerFolder = campaignData.textOptionsPerFolder || [[]];
     const sendAsDraft = !!document.getElementById('sendAsDraft')?.checked;
     apiUpdateCampaign(pid, cid, { ...campaignData, textStylePerFolder, sendAsDraft }, ptId)
-      .then((c) => { campaignData = c; return apiCampaignRun(pid, cid, textStylePerFolder, textOptionsPerFolder, sendAsDraft, ptId); })
+      .then((c) => { campaignData = c; return apiCampaignRun(pid, cid, textStylePerFolder, textOptionsPerFolder, sendAsDraft, false, ptId); })
       .then((data) => {
         if (data.error) throw new Error(data.error);
         let msg = `Done. ${(data.webContentUrls || []).length} URL(s) generated.`;
@@ -1797,7 +2314,7 @@ function renderPostTypeSelector(pid, cid, project, campaign) {
   const hasPostTypes = postTypes.length > 0;
   const isPageContent = isRecurringContentCampaign(project, campaign) || isProjectContent(pid);
   const backLink = isPageContent ? contentBackLink(pid, cid) : `#/campaigns/${cid}`;
-  const backLabel = isPageContent ? `← Back to ${escapeHtml(project.name)}` : '← Back to campaign';
+  const backLabel = fromRecurringPages ? '← Back to Recurring Pages' : (isPageContent ? `← Back to ${escapeHtml(project.name)}` : '← Back to campaign');
   const title = campaignDisplayTitle(project, campaign);
   const ptLink = (ptId) => contentPostTypeLink(pid, cid, ptId, '');
   const campaignAvatarSection = `<div class="campaign-header-avatar-inner"><img src="${campaignAvatarUrl(cid)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(title || 'C').charAt(0).toUpperCase()}</span></div>`;
@@ -1946,7 +2463,8 @@ function renderCampaign(projectId, campaignId, postTypeId) {
     apiCampaign(pid, cid, postTypeId ? ptId : null),
     postTypeId ? apiCampaignFolders(pid, cid, ptId) : Promise.resolve({ folders: {}, folderCount: 0 }),
     apiCampaignLatest(pid, cid),
-  ]).then(([project, campaign, foldersData, latest]) => {
+    apiConfig(),
+  ]).then(([project, campaign, foldersData, latest, config]) => {
     if (!project || !campaign) {
       document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap back-link-wrap-centered"><a href="#/campaigns" class="nav-link">← Back to campaigns</a></p><p>Campaign not found.</p></section>';
       return;
@@ -1961,37 +2479,48 @@ function renderCampaign(projectId, campaignId, postTypeId) {
       return;
     }
     if (mediaType === 'video') {
-      renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, latest);
+      renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, latest, config);
       return;
     }
     if (mediaType === 'video_text') {
-      renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersData, latest);
+      renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersData, latest, config);
       return;
     }
+    const serverTz = (config && config.timezone) || 'America/New_York';
+    const userTz = getCalendarDisplayTimezone(serverTz);
+    const rawTimes = campaign.scheduleTimes || ['10:00', '13:00', '16:00'];
+    const times = rawTimes.map((t) => convertTimeForDisplay(serverTz, userTz, t || '10:00'));
     const folders = foldersData.folders || {};
     const folderCount = Math.max(1, foldersData.folderCount || (campaign.folderCount || 3));
     const textOptionsPerFolder = campaign.textOptionsPerFolder || Array(folderCount).fill(null).map(() => []);
     setBreadcrumb({ view: 'campaign', projectId: pid, campaignId: cid }, project, campaign);
-    const times = campaign.scheduleTimes || ['10:00', '13:00', '16:00'];
     const scheduleStart = campaign.scheduleStartDate || '';
     const scheduleEnd = campaign.scheduleEndDate || '';
     const daysOfWeek = campaign.scheduleDaysOfWeek ?? [0, 1, 2, 3, 4, 5, 6];
     const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     const main = document.getElementById('main');
-
+    const isPageContentHere = isRecurringContentCampaign(project, campaign) || isProjectContent(pid);
+    const hideFolderThumbnails = true;
     const folderCards = [];
+    const samePhotoEachTime = campaign.samePhotoEachTimePerFolder || [];
     for (let i = 1; i <= folderCount; i++) {
       const list = folders[`folder${i}`] || [];
       const count = list.length;
       const canDelete = folderCount > 1;
+      const sameChecked = !!samePhotoEachTime[i - 1];
       folderCards.push(`
         <div class="folder" data-folder="${i}">
           <div class="dropzone" id="dropzone${i}" data-folder-num="${i}">
             <span class="dropzone-label">Folder ${i}</span>
             <span class="dropzone-count" id="count${i}">${count} photo${count !== 1 ? 's' : ''}</span>
+            ${hideFolderThumbnails ? '' : `<div class="dropzone-thumbnails" id="dropzoneThumbs${i}" data-folder-num="${i}"></div>`}
             <button type="button" class="btn btn-secondary btn-sm dropzone-add">Add photos</button>
             <button type="button" class="btn btn-ghost btn-sm dropzone-view">View / manage</button>
             ${canDelete ? `<button type="button" class="btn btn-ghost btn-sm dropzone-delete" data-folder-num="${i}">Delete folder</button>` : ''}
+            <label class="checkbox-field same-photo-each-time-wrap" style="display:block;margin-top:0.5rem;">
+              <input type="checkbox" class="same-photo-each-time" data-folder-num="${i}" ${sameChecked ? 'checked' : ''} />
+              <span>Same Photo Each Time</span>
+            </label>
             <input type="file" accept="image/*" multiple hidden id="input${i}" />
           </div>
         </div>
@@ -2004,7 +2533,6 @@ function renderCampaign(projectId, campaignId, postTypeId) {
     }
 
     const title = campaignDisplayTitle(project, campaign);
-    const isPageContentHere = isRecurringContentCampaign(project, campaign) || isProjectContent(pid);
     const backTo = isPageContentHere ? contentBackLink(pid, cid) : `#/campaign/${pid}/${cid}`;
     const backLabel = isPageContentHere ? `← Back to ${escapeHtml(project.name)}` : '← Back to post types';
     const campaignAvatarSection = `<div class="campaign-header-avatar-inner" id="campaignHeaderAvatarInner"><img src="${campaignAvatarUrl(cid)}" alt="" class="campaign-avatar-img" id="campaignAvatarImg" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" id="campaignAvatarPlaceholder" style="display:none;">${(campaign.name || 'C').charAt(0).toUpperCase()}</span></div><input type="file" accept="image/*" id="campaignAvatarInput" hidden />`;
@@ -2038,7 +2566,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
 
       <section class="card">
         <h2>Photo folders</h2>
-        <p class="hint">Click a folder to view, add, or delete photos. One image with the lowest use number is picked from each folder per run (photos stay in the folder; the number on each shows how many times it has been used).</p>
+        <p class="hint">Click a folder to view, add, or delete photos. One image with the lowest use number is picked from each folder per run (photos stay in the folder; the number on each shows how many times it has been used). Check &quot;Same Photo Each Time&quot; on a folder to reuse that folder&apos;s image for every post—so you can deploy more posts (e.g. 22) even if that folder has only 1 photo.</p>
         <div class="folders" id="foldersContainer">
           ${folderCards.join('')}
           <button type="button" class="btn btn-secondary add-folder-btn" id="addFolderBtn">+ Add folder</button>
@@ -2061,16 +2589,18 @@ function renderCampaign(projectId, campaignId, postTypeId) {
             const firstItem = (folders[`folder${f}`] || [])[0];
             const firstImg = typeof firstItem === 'string' ? firstItem : (firstItem && firstItem.filename);
             const imgUrl = firstImg ? folderImageUrl(pid, cid, f, firstImg, ptId) : '';
-            const sampleText = (textOptionsPerFolder[f - 1] && textOptionsPerFolder[f - 1][0]) || 'Sample text';
+            const displayX = (ts.x === 50 || ts.x == null) ? 0 : ts.x;
+            const displayY = (ts.y === 50 || ts.y == null) ? 0 : ts.y;
+            const displaySize = (ts.fontSize != null && ts.fontSize >= 12 && ts.fontSize <= 200) ? Math.round(ts.fontSize) : 60;
             return `
           <div class="text-style-folder-card text-style-folder-card-live" data-folder="${f}">
             <h4 class="text-style-folder-title">Folder ${f}</h4>
             <div class="text-style-folder-row">
               <div class="text-style-settings-panel" data-folder="${f}">
                 <div class="text-style-grid">
-                  <label class="field"><span>X (%)</span><input type="number" data-folder="${f}" data-field="x" value="${(ts.x ?? 50)}" min="0" max="100" title="0 = center" /></label>
-                  <label class="field"><span>Y (%)</span><input type="number" data-folder="${f}" data-field="y" value="${(ts.y ?? 92)}" min="0" max="100" title="0 = center" /></label>
-                  <label class="field"><span>Size (px)</span><input type="number" data-folder="${f}" data-field="size" value="${(ts.fontSize != null && ts.fontSize >= 12 && ts.fontSize <= 200) ? Math.round(ts.fontSize) : Math.max(12, Math.min(200, Math.round(720 * (Number(ts.fontSize) || 0.06))))}" min="12" max="200" step="1" title="Font size in pixels" /></label>
+                  <label class="field"><span>X (%)</span><input type="number" data-folder="${f}" data-field="x" value="${displayX}" min="0" max="100" title="0 = center" /></label>
+                  <label class="field"><span>Y (%)</span><input type="number" data-folder="${f}" data-field="y" value="${displayY}" min="0" max="100" title="0 = center" /></label>
+                  <label class="field"><span>Size (px)</span><input type="number" data-folder="${f}" data-field="size" value="${displaySize}" min="12" max="200" step="1" title="Font size in pixels" /></label>
                   <label class="field"><span>Font</span><select data-folder="${f}" data-field="font" class="field-select">${(() => { const current = ts.font || 'Arial, sans-serif'; const fonts = AVAILABLE_FONTS.includes(current) ? AVAILABLE_FONTS : [current, ...AVAILABLE_FONTS]; return fonts.map((font) => `<option value="${escapeHtml(font)}" ${current === font ? 'selected' : ''}>${escapeHtml(font)}</option>`).join(''); })()}</select></label>
                   <label class="field"><span>Color</span><input type="text" data-folder="${f}" data-field="color" value="${escapeHtml(ts.color || 'white')}" /></label>
                   <label class="field"><span>Stroke</span><input type="number" data-folder="${f}" data-field="strokeWidth" value="${(ts.strokeWidth ?? 2)}" min="0" max="10" step="0.5" /></label>
@@ -2136,6 +2666,8 @@ function renderCampaign(projectId, campaignId, postTypeId) {
           <span>Send to Blotato as draft</span>
         </label>
         <p class="hint" style="margin-top:-8px;margin-bottom:12px;">When checked, the post goes to TikTok drafts (mobile app) instead of publishing immediately.</p>
+        <label class="checkbox-field" style="margin-bottom:12px;"><input type="checkbox" id="addMusicToCarousel" ${campaign.addMusicToCarousel ? 'checked' : ''} /><span>Add music to carousel</span></label>
+        <p class="hint" style="margin-top:-8px;margin-bottom:12px;">When checked, Blotato will auto-add music to the carousel post.</p>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button type="button" class="btn btn-primary" id="runNow">Run now</button>
           <button type="button" class="btn btn-secondary" id="clearUrlsBtn">Clear URLs</button>
@@ -2157,6 +2689,20 @@ function renderCampaign(projectId, campaignId, postTypeId) {
           const el = document.getElementById(`count${i}`);
           const list = fol[`folder${i}`] || [];
           if (el) el.textContent = `${list.length} photo${list.length !== 1 ? 's' : ''}`;
+          if (!hideFolderThumbnails) {
+            const thumbsEl = document.getElementById(`dropzoneThumbs${i}`);
+            if (thumbsEl) {
+              thumbsEl.innerHTML = list.map((item) => {
+                const filename = typeof item === 'string' ? item : (item && item.filename) || '';
+                const usageCount = typeof item === 'object' && item && 'usageCount' in item ? item.usageCount : 0;
+                const url = folderImageUrl(pid, cid, i, filename, ptId);
+                return `<div class="dropzone-thumb" title="${escapeHtml(filename)}"><img data-src="${url}" alt="" class="dropzone-thumb-img" /><span class="folder-photo-usage-badge">${usageCount}</span></div>`;
+              }).join('');
+              thumbsEl.querySelectorAll('img[data-src]').forEach((img) => {
+                withAuthQuery(img.dataset.src).then((u) => { img.src = u; img.removeAttribute('data-src'); });
+              });
+            }
+          }
         }
       });
     }
@@ -2195,12 +2741,31 @@ function renderCampaign(projectId, campaignId, postTypeId) {
       };
     }
 
+    updateFolderCounts();
     const addFolderBtn = document.getElementById('addFolderBtn');
     if (addFolderBtn) {
       addFolderBtn.onclick = () => {
         apiAddFolder(pid, cid, ptId).then(() => render()).catch((err) => showAlert(err.message || err.error || 'Failed to add folder'));
       };
     }
+    function getSamePhotoEachTimePerFolder() {
+      const arr = [];
+      document.querySelectorAll('.same-photo-each-time').forEach((cb) => {
+        const num = parseInt(cb.dataset.folderNum, 10);
+        if (num >= 1) {
+          while (arr.length < num) arr.push(false);
+          arr[num - 1] = cb.checked;
+        }
+      });
+      while (arr.length < folderCount) arr.push(false);
+      return arr;
+    }
+    document.querySelectorAll('.same-photo-each-time').forEach((cb) => {
+      cb.addEventListener('change', () => {
+        const samePhotoEachTimePerFolder = getSamePhotoEachTimePerFolder();
+        apiUpdateCampaign(pid, cid, { ...campaign, samePhotoEachTimePerFolder }, ptId).then((c) => { campaign = c; });
+      });
+    });
     const campAvatarImg = document.getElementById('campaignAvatarImg');
     const campAvatarPlaceholder = document.getElementById('campaignAvatarPlaceholder');
     const campAvatarInput = document.getElementById('campaignAvatarInput');
@@ -2277,7 +2842,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
       rows[rows.length - 1].remove();
     };
     document.getElementById('saveCampaign').onclick = () => {
-      const timesArr = Array.from(document.querySelectorAll('.time-input')).map((i) => i.value || '10:00');
+      const timesArr = Array.from(document.querySelectorAll('.time-input')).map((i) => i.value || '10:00').map((t) => convertTimeToServer(userTz, serverTz, t));
       const daysChecked = Array.from(document.querySelectorAll('.schedule-day:checked')).map((cb) => parseInt(cb.dataset.day, 10));
       apiUpdateCampaign(pid, cid, {
         ...campaign,
@@ -2336,17 +2901,17 @@ function renderCampaign(projectId, campaignId, postTypeId) {
         const el = document.querySelector(`[data-folder="${f}"][data-field="${field}"]`);
         return el ? el.value : null;
       };
-      const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat(get('size')) || 48)));
+      const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat(get('size')) || 60)));
       const textStyle = {
-        x: parseFloat(get('x')) ?? 50,
-        y: parseFloat(get('y')) ?? 92,
+        x: parseFloat(get('x')) || 0,
+        y: parseFloat(get('y')) || 0,
         fontSize: sizePx,
         font: (get('font') || 'Arial, sans-serif').trim(),
         color: (get('color') || 'white').trim(),
         strokeWidth: parseFloat(get('strokeWidth')) ?? 2,
       };
       const opts = (textOptionsPerFolder[f - 1]);
-      const sampleText = (opts && opts[0]) ? String(opts[0]) : 'Sample text';
+      const sampleText = (opts && opts.length && opts[0]) ? String(opts[0]) : null;
       if (loading) { loading.style.display = 'block'; loading.textContent = 'Loading…'; }
       img.style.opacity = '0.3';
       apiTextStylePreview(pid, cid, f, textStyle, sampleText, textOptionsPerFolder, ac.signal, ptId)
@@ -2430,10 +2995,10 @@ function renderCampaign(projectId, campaignId, postTypeId) {
           const el = document.querySelector(`[data-folder="${f}"][data-field="${field}"]`);
           return el ? el.value : null;
         };
-        const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat(get('size')) || 48)));
+        const sizePx = Math.max(12, Math.min(200, Math.round(parseFloat(get('size')) || 60)));
         textStylePerFolder.push({
-          x: parseFloat(get('x')) ?? 50,
-          y: parseFloat(get('y')) ?? 92,
+          x: parseFloat(get('x')) || 0,
+          y: parseFloat(get('y')) || 0,
           fontSize: sizePx,
           font: (get('font') || 'Arial, sans-serif').trim(),
           color: (get('color') || 'white').trim(),
@@ -2450,8 +3015,9 @@ function renderCampaign(projectId, campaignId, postTypeId) {
       const textStylePerFolder = getCurrentTextStylePerFolder();
       const textOptionsPerFolder = campaign.textOptionsPerFolder || [];
       const sendAsDraft = !!document.getElementById('sendAsDraft')?.checked;
-      apiUpdateCampaign(pid, cid, { ...campaign, textStylePerFolder, sendAsDraft }, ptId)
-        .then((c) => { campaign = c; return apiCampaignRun(pid, cid, textStylePerFolder, textOptionsPerFolder, sendAsDraft, ptId); })
+      const addMusicToCarousel = !!document.getElementById('addMusicToCarousel')?.checked;
+      apiUpdateCampaign(pid, cid, { ...campaign, textStylePerFolder, sendAsDraft, addMusicToCarousel }, ptId)
+        .then((c) => { campaign = c; return apiCampaignRun(pid, cid, textStylePerFolder, textOptionsPerFolder, sendAsDraft, addMusicToCarousel, ptId); })
         .then((data) => {
           if (data.error) throw new Error(data.error);
           let msg = `Done. ${(data.webContentUrls || []).length} URL(s) generated.`;
@@ -2547,22 +3113,35 @@ function renderCampaignFolderPhotos(projectId, campaignId, folderNum, postTypeId
     const addBtn = document.getElementById('folderPhotosAddBtn');
     const clearBtn = document.getElementById('folderPhotosClearBtn');
 
+    function revokeObjectUrlsInGrid() {
+      if (!grid) return;
+      grid.querySelectorAll('img[data-object-url]').forEach((img) => {
+        const u = img.dataset.objectUrl;
+        if (u) try { URL.revokeObjectURL(u); } catch (_) {}
+      });
+    }
     function refresh() {
       apiCampaignFolders(pid, cid, ptId).then((data) => {
         const imgs = (data.folders || {})[`folder${fnum}`] || [];
         if (!grid) return;
+        revokeObjectUrlsInGrid();
         grid.innerHTML = imgs.map((item) => {
           const filename = typeof item === 'string' ? item : (item && item.filename) || '';
           const usageCount = typeof item === 'object' && item && 'usageCount' in item ? item.usageCount : 0;
+          const apiUrl = folderImageUrl(pid, cid, fnum, filename, ptId);
           return `
           <div class="folder-photo-item">
-            <img data-src="${folderImageUrl(pid, cid, fnum, filename, ptId)}" alt="" loading="lazy" />
-            ${usageCount > 0 ? `<span class="folder-photo-usage-badge" title="Times used in runs">${usageCount}</span>` : ''}
+            <img data-src="${apiUrl}" alt="" loading="lazy" />
+            <span class="folder-photo-usage-badge" title="Times used in runs">${usageCount}</span>
             <button type="button" class="folder-photo-delete" data-filename="${escapeHtml(filename)}">×</button>
           </div>
         `}).join('');
         grid.querySelectorAll('img[data-src]').forEach((img) => {
-          withAuthQuery(img.dataset.src).then((url) => { img.src = url; img.removeAttribute('data-src'); });
+          const url = img.dataset.src;
+          img.removeAttribute('data-src');
+          withAuthQuery(url).then((authUrl) => {
+            img.src = authUrl;
+          }).catch(() => { img.alt = 'Failed to load'; });
         });
         grid.querySelectorAll('.folder-photo-delete').forEach((btn) => {
           btn.onclick = () => {
@@ -2621,7 +3200,7 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
     if (!project || !campaign) { document.getElementById('main').innerHTML = '<section class="card"><p>Not found.</p></section>'; return; }
     const isVideoText = campaign.mediaType === 'video_text';
     const title = isVideoText ? 'Videos' : (folderLabels[fnum] || `Folder ${fnum}`) + ' – videos';
-    const hint = isVideoText ? 'Add or remove videos. One video is picked at random per run and combined with a random text option.' : 'Add or remove videos. One video is picked at random from this folder per run (Priority is used first, then Fallback).';
+    const hint = isVideoText ? 'Add or remove videos. One video with the lowest use number is picked per run (all get used before any is reused). The number on each shows how many times it has been used. Max 50 MB per video.' : 'Add or remove videos. Each video is posted only once. After posting, it stays in the folder for 7 days with a "Video posted" overlay, then is permanently deleted. Only unposted videos are used for new runs.';
     const list = (foldersData.folders || {})[`folder${fnum}`] || [];
     const main = document.getElementById('main');
     main.innerHTML = `
@@ -2642,18 +3221,51 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
     const addBtn = document.getElementById('folderVideosAddBtn');
     const clearBtn = document.getElementById('folderVideosClearBtn');
 
+    function revokeVideoObjectUrls() {
+      if (!grid) return;
+      grid.querySelectorAll('video[data-object-url]').forEach((v) => {
+        const u = v.dataset.objectUrl;
+        if (u) try { URL.revokeObjectURL(u); } catch (_) {}
+      });
+    }
     function refresh() {
       apiCampaignFolders(pid, cid, ptId).then((data) => {
         const videos = (data.folders || {})[`folder${fnum}`] || [];
         if (!grid) return;
-        grid.innerHTML = videos.map((filename) => `
-          <div class="folder-photo-item">
-            <video data-src="${folderMediaUrl(pid, cid, fnum, filename, ptId)}" controls preload="metadata" style="max-width:100%;max-height:200px;"></video>
+        revokeVideoObjectUrls();
+        grid.innerHTML = videos.map((item) => {
+          const filename = typeof item === 'string' ? item : (item && item.filename) || '';
+          const usageCount = typeof item === 'object' && item && 'usageCount' in item ? item.usageCount : 0;
+          const postedAt = typeof item === 'object' && item && item.postedAt;
+          const daysLeft = typeof item === 'object' && item && typeof item.daysLeft === 'number' ? item.daysLeft : null;
+          const mediaUrl = folderMediaUrl(pid, cid, fnum, filename, ptId);
+          const overlayHtml = !isVideoText && postedAt
+            ? `<div class="folder-video-posted-overlay" title="Posted; will be deleted in ${daysLeft} day(s)">
+                <span class="folder-video-posted-label">Video posted</span>
+                <span class="folder-video-posted-days">${daysLeft} day${daysLeft !== 1 ? 's' : ''} left</span>
+              </div>`
+            : '';
+          const badgeHtml = isVideoText
+            ? `<span class="folder-photo-usage-badge" title="Times used in runs">${usageCount}</span>`
+            : '';
+          return `
+          <div class="folder-photo-item folder-video-item${postedAt ? ' folder-video-posted' : ''}">
+            <div class="folder-video-preview-wrap">
+              <video data-src="${escapeHtml(mediaUrl)}" controls preload="metadata" style="max-width:100%;max-height:200px;background:#111;"></video>
+              ${overlayHtml}
+            </div>
+            ${badgeHtml}
             <button type="button" class="folder-photo-delete" data-filename="${escapeHtml(filename)}">×</button>
           </div>
-        `).join('');
+        `;
+        }).join('');
         grid.querySelectorAll('video[data-src]').forEach((v) => {
-          withAuthQuery(v.dataset.src).then((url) => { v.src = url; v.removeAttribute('data-src'); });
+          const url = v.dataset.src;
+          if (!url) return;
+          withAuthQuery(url).then((authUrl) => {
+            v.src = authUrl;
+            v.removeAttribute('data-src');
+          }).catch(() => {});
         });
         grid.querySelectorAll('.folder-photo-delete').forEach((btn) => {
           btn.onclick = () => {
@@ -2668,8 +3280,9 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
     addInput.onchange = (e) => {
       const files = e.target.files;
       if (!files?.length) return;
-      const mediaType = campaign.mediaType === 'video_text' ? 'video_text' : 'video';
-      apiCampaignUpload(pid, cid, fnum, files, ptId, mediaType).then(refresh).catch(() => showAlert('Upload failed'));
+      const pt = (campaign.postTypes || []).find((p) => p.id === ptId);
+      const mediaType = (pt && pt.mediaType === 'video_text') ? 'video_text' : 'video';
+      apiCampaignUpload(pid, cid, fnum, files, ptId, mediaType).then(refresh).catch((err) => showAlert(err.message || 'Upload failed'));
       addInput.value = '';
     };
     const cardVideos = main.querySelector('.card');
@@ -2830,7 +3443,7 @@ function openNewCampaignModal(projects, onSuccess) {
   nameInput.value = 'New campaign';
   pagesDiv.innerHTML = projects.map((p) => `
     <label class="checkbox-field" style="display:flex;align-items:center;gap:8px;margin:6px 0;">
-      <input type="checkbox" data-page-id="${p.id}" checked />
+      <input type="checkbox" data-page-id="${p.id}" />
       <span>${escapeHtml(p.name)}</span>
     </label>
   `).join('');
@@ -3263,10 +3876,13 @@ function renderCampaignDetail(campaignId) {
         campaignTrendsList.innerHTML = '<p class="hint">No trends in this campaign yet. Click &quot;New trend&quot; below to add one.</p>';
       } else {
         const sorted = [...trends].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-        campaignTrendsList.innerHTML = sorted.map((t) => `
+        campaignTrendsList.innerHTML = sorted.map((t) => {
+          const trendAvatar = `<div class="list-card-avatar campaign-avatar campaign-avatar-square"><img src="${trendAvatarUrl(t.id)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(t.name || 'T').charAt(0).toUpperCase()}</span></div>`;
+          return `
           <div class="campaigns-list-item">
             <a href="#/trends/${t.id}" class="campaign-card-link">
               <div class="list-card">
+                ${trendAvatar}
                 <div class="list-card-main">
                   <span class="list-card-title">${escapeHtml(t.name)}</span>
                   <span class="list-card-meta">${(t.pageIds && t.pageIds.length) ? t.pageIds.length + ' page(s)' : 'No pages'}</span>
@@ -3275,7 +3891,8 @@ function renderCampaignDetail(campaignId) {
             </a>
             <button type="button" class="btn btn-ghost btn-sm list-card-action" data-action="delete-campaign-trend" data-tid="${t.id}" data-tname="${escapeHtml(t.name)}" aria-label="Delete">Delete</button>
           </div>
-        `).join('');
+        `;
+        }).join('');
         campaignTrendsList.querySelectorAll('[data-action="delete-campaign-trend"]').forEach((btn) => {
           btn.onclick = (e) => {
             e.preventDefault();
@@ -3422,9 +4039,15 @@ function openJoinCampaignModal(projectId, joinableCampaigns, onSuccess) {
     showAlert('No campaigns available. All campaigns already include this page.');
     return;
   }
-  list.innerHTML = joinableCampaigns.map((c) => `
-    <button type="button" class="btn btn-secondary" style="width:100%;justify-content:flex-start;margin:4px 0;" data-campaign-id="${c.id}">+ ${escapeHtml(c.name)}</button>
-  `).join('');
+  list.innerHTML = joinableCampaigns.map((c) => {
+    const avatarImg = `<img src="${campaignAvatarUrl(c.id)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(c.name || 'C').charAt(0).toUpperCase()}</span>`;
+    return `
+    <button type="button" class="btn btn-secondary join-campaign-item" style="width:100%;justify-content:flex-start;margin:4px 0;" data-campaign-id="${c.id}">
+      <div class="campaign-page-avatar campaign-avatar campaign-avatar-square">${avatarImg}</div>
+      <span>+ ${escapeHtml(c.name)}</span>
+    </button>
+  `;
+  }).join('');
   modal.hidden = false;
   const close = () => { modal.hidden = true; };
   cancelBtn.onclick = close;
@@ -3637,10 +4260,13 @@ function renderTrends() {
       list.innerHTML = '<p class="empty">No trends yet. Start a new trend and select which pages to include.</p>';
     } else {
       const sorted = [...trends].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-      list.innerHTML = sorted.map((t) => `
+      list.innerHTML = sorted.map((t) => {
+        const trendAvatar = `<div class="list-card-avatar campaign-avatar campaign-avatar-square"><img src="${trendAvatarUrl(t.id)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(t.name || 'T').charAt(0).toUpperCase()}</span></div>`;
+        return `
         <div class="campaigns-list-item">
           <a href="#/trends/${t.id}" class="campaign-card-link">
             <div class="list-card">
+              ${trendAvatar}
               <div class="list-card-main">
                 <span class="list-card-title">${escapeHtml(t.name)}</span>
                 <span class="list-card-meta">${(t.pageIds && t.pageIds.length) ? t.pageIds.length + ' page(s)' : 'No pages'}</span>
@@ -3649,7 +4275,8 @@ function renderTrends() {
           </a>
           <button type="button" class="btn btn-ghost btn-sm list-card-action" data-action="delete-trend" data-tid="${t.id}" data-tname="${escapeHtml(t.name)}" aria-label="Delete">Delete</button>
         </div>
-      `).join('');
+      `;
+      }).join('');
     }
     document.getElementById('newTrendBtn').onclick = () => {
       location.hash = '#/trends/new';
@@ -3762,10 +4389,16 @@ function renderTrendDetail(trendId) {
     }).join('');
 
     const main = document.getElementById('main');
+    const trendAvatarEl = `<div class="campaign-detail-avatar-wrap"><div class="campaign-avatar-clickable" id="trendDetailAvatarClickable" title="Click to change image"><div class="campaign-avatar campaign-avatar-square"><img src="${trendAvatarUrl(tid)}" alt="" class="campaign-avatar-img" id="trendDetailAvatarImg" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" id="trendDetailAvatarPlaceholder" style="display:none;">${(trend.name || 'T').charAt(0).toUpperCase()}</span></div></div><input type="file" accept="image/*" id="trendDetailAvatarInput" hidden /></div>`;
     main.innerHTML = `
       <section class="card">
         ${backLink}
-        <h1 id="trendDetailName" title="Double-click to rename">${escapeHtml(trend.name)}</h1>
+        <div class="trend-detail-header" style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
+          ${trendAvatarEl}
+          <div>
+            <h1 id="trendDetailName" title="Double-click to rename" style="margin:0;">${escapeHtml(trend.name)}</h1>
+          </div>
+        </div>
 
         <section class="card" style="margin-top:1rem;">
           <h2>Campaign</h2>
@@ -3801,6 +4434,8 @@ function renderTrendDetail(trendId) {
               <textarea id="trendTextOptions" rows="4" class="field-input" placeholder="Follow for more\nLike &amp; Save">${escapeHtml((textOptions || []).join('\n'))}</textarea>
             </div>
           </div>
+          <label class="checkbox-field" style="margin-top:12px;display:block;"><input type="checkbox" id="trendSendAsDraft" ${trend.sendAsDraft ? 'checked' : ''} /><span>Send to Blotato as draft</span></label>
+          <label class="checkbox-field" style="margin-top:8px;display:block;"><input type="checkbox" id="trendAddMusicToCarousel" ${trend.addMusicToCarousel ? 'checked' : ''} /><span>Add music to carousel</span></label>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
             <button type="button" class="btn btn-secondary" id="trendSaveTextStyle">Save text styles</button>
             <button type="button" class="btn btn-primary" id="trendRunNow">Run now</button>
@@ -4099,7 +4734,9 @@ function renderTrendDetail(trendId) {
             color: ((document.getElementById('trendTextColor') || {}).value || 'white').trim(),
             strokeWidth: parseFloat((document.getElementById('trendTextStroke') || {}).value) ?? 2,
           };
-          apiTrendRun(tid, textStyleObj, textOptionsArr.length ? textOptionsArr : null).then(() => renderTrendDetail(tid)).catch((err) => showAlert(err.message || 'Run failed'));
+          const sendAsDraft = !!document.getElementById('trendSendAsDraft')?.checked;
+          const addMusicToCarousel = !!document.getElementById('trendAddMusicToCarousel')?.checked;
+          apiUpdateTrend(tid, { ...trend, sendAsDraft, addMusicToCarousel }).then((t) => { trend = t; return apiTrendRun(tid, textStyleObj, textOptionsArr.length ? textOptionsArr : null, sendAsDraft, addMusicToCarousel); }).then(() => renderTrendDetail(tid)).catch((err) => showAlert(err.message || 'Run failed'));
         };
       }
 
@@ -4123,7 +4760,9 @@ function renderTrendDetail(trendId) {
         color: (document.getElementById('trendTextColor').value || 'white').trim(),
         strokeWidth: parseFloat(document.getElementById('trendTextStroke').value) ?? 2,
       };
-      apiTrendRun(tid, textStyleObj, textOptionsArr.length ? textOptionsArr : null).then(() => renderTrendDetail(tid)).catch((err) => showAlert(err.message || 'Run failed'));
+      const sendAsDraft = !!document.getElementById('trendSendAsDraft')?.checked;
+      const addMusicToCarousel = !!document.getElementById('trendAddMusicToCarousel')?.checked;
+      apiUpdateTrend(tid, { ...trend, sendAsDraft, addMusicToCarousel }).then((t) => { trend = t; return apiTrendRun(tid, textStyleObj, textOptionsArr.length ? textOptionsArr : null, sendAsDraft, addMusicToCarousel); }).then(() => renderTrendDetail(tid)).catch((err) => showAlert(err.message || 'Run failed'));
     };
 
     document.getElementById('trendClearUrls').onclick = () => {
@@ -4140,36 +4779,378 @@ function renderTrendDetail(trendId) {
 function renderCalendar() {
   setBreadcrumb({ view: 'calendar' });
   apiWithAuth(`${API}/api/calendar`).then((r) => r.json()).then((data) => {
-    const items = data.items || [];
+    const allItems = data.items || [];
+    const recurringTodo = Array.isArray(data.recurringTodo) ? data.recurringTodo : (data.todo || []).filter((t) => t.type === 'recurring').sort((a, b) => ((a.daysUntil ?? 999) - (b.daysUntil ?? 999)) || (a.stopDate || '').localeCompare(b.stopDate || ''));
+    const campaignGapTodo = Array.isArray(data.campaignGapTodo) ? data.campaignGapTodo : (data.todo || []).filter((t) => t.type === 'campaign_gap').sort((a, b) => (a.daysBefore ?? 999) - (b.daysBefore ?? 999));
     const main = document.getElementById('main');
-    const total = items.length;
-    if (!items.length) {
-      main.innerHTML = '<section class="card"><h1>Calendar</h1><p class="calendar-total">Total scheduled: <strong>0</strong></p><p class="hint">Upcoming scheduled posts (deployed campaigns only).</p><p class="empty">No scheduled runs. Deploy campaigns and set times to see them here.</p></section>';
+    const serverTz = data.timezone || 'America/New_York';
+    const displayTz = getCalendarDisplayTimezone(serverTz);
+    const tzLabel = data.timezoneLabel || data.timezone || '';
+    const tzHint = tzLabel ? ` Schedule runs in ${tzLabel}; times below use your selected timezone.` : '';
+    const campaigns = [];
+    const seenCampaign = new Set();
+    allItems.forEach((it) => {
+      const id = it.campaignId;
+      if (id != null && !seenCampaign.has(id)) { seenCampaign.add(id); campaigns.push({ id, name: it.campaignName || ('Campaign ' + id) }); }
+    });
+    campaigns.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    const pages = [];
+    const seenPage = new Set();
+    allItems.forEach((it) => {
+      const id = it.projectId;
+      if (id != null && !seenPage.has(id)) { seenPage.add(id); pages.push({ id, name: it.projectName || ('Page ' + id) }); }
+    });
+    pages.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    let scopeFilter = 'all';
+    let selectedCampaignId = null;
+    let selectedProjectId = null;
+    let viewMode = 'list';
+    let selectedDay = null;
+    let calendarMonth = new Date();
+
+    function getFilteredItems() {
+      if (scopeFilter === 'campaign') {
+        if (selectedCampaignId == null) return [];
+        return allItems.filter((it) => String(it.campaignId) === String(selectedCampaignId));
+      }
+      if (scopeFilter === 'page') {
+        if (selectedProjectId == null) return [];
+        return allItems.filter((it) => String(it.projectId) === String(selectedProjectId));
+      }
+      return allItems;
+    }
+
+    function doExportCsv() {
+      const items = getFilteredItems();
+      const escapeCsv = (val) => {
+        const s = String(val == null ? '' : val);
+        if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+        return s;
+      };
+      const header = 'Date,Time,Page,Campaign';
+      const rows = items.map((it) => {
+        const inTz = it.scheduledAt ? formatScheduledAtInTz(it.scheduledAt, displayTz) : null;
+        const dateDisplay = inTz ? inTz.dateLabel : formatCalendarDate(it.date);
+        const timeDisplay = inTz ? inTz.timeLabel : formatTimeAMPM(it.time);
+        return [escapeCsv(dateDisplay), escapeCsv(timeDisplay), escapeCsv(it.projectName), escapeCsv(it.campaignName)].join(',');
+      });
+      const csv = [header, ...rows].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `calendar-export-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function render() {
+      const items = getFilteredItems();
+      const total = items.length;
+      const itemsByDateKey = {};
+      items.forEach((it) => {
+        const key = it.scheduledAt ? getScheduledDateKey(it.scheduledAt, displayTz) : (it.date || '');
+        if (key) {
+          if (!itemsByDateKey[key]) itemsByDateKey[key] = [];
+          itemsByDateKey[key].push(it);
+        }
+      });
+      const monthYear = calendarMonth.getFullYear();
+      const monthIndex = calendarMonth.getMonth();
+      const firstDay = new Date(monthYear, monthIndex, 1);
+      const lastDay = new Date(monthYear, monthIndex + 1, 0);
+      const startWeekday = firstDay.getDay();
+      const daysInMonth = lastDay.getDate();
+      const monthName = firstDay.toLocaleString('en-US', { month: 'long' });
+      const today = new Date();
+      const todayKey = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+
+      const selectedCampaign = selectedCampaignId != null ? campaigns.find((c) => String(c.id) === String(selectedCampaignId)) : null;
+      const campaignPickerTriggerLabel = selectedCampaign ? escapeHtml(selectedCampaign.name) : 'Select campaign';
+      const campaignPickerTriggerAvatar = selectedCampaign
+        ? `<span class="calendar-campaign-picker-trigger-avatar"><img src="${campaignAvatarUrl(selectedCampaign.id)}" alt="" class="calendar-campaign-picker-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="calendar-campaign-picker-avatar-placeholder" style="display:none;">${(selectedCampaign.name || 'C').charAt(0).toUpperCase()}</span></span>`
+        : '';
+      const campaignPickerItems = campaigns.length ? campaigns.map((c) => {
+        const sel = selectedCampaignId != null && String(c.id) === String(selectedCampaignId);
+        return `<button type="button" class="calendar-campaign-picker-item ${sel ? 'calendar-campaign-picker-item-selected' : ''}" data-campaign-id="${escapeHtml(String(c.id))}" title="${escapeHtml(c.name)}">
+          <span class="calendar-campaign-picker-item-avatar"><img src="${campaignAvatarUrl(c.id)}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="calendar-campaign-picker-avatar-placeholder" style="display:none;">${(c.name || 'C').charAt(0).toUpperCase()}</span></span>
+          <span class="calendar-campaign-picker-item-name">${escapeHtml(c.name)}</span>
+        </button>`;
+      }).join('') : '<div class="calendar-campaign-picker-empty">No campaigns</div>';
+      const selectedPage = selectedProjectId != null ? pages.find((p) => String(p.id) === String(selectedProjectId)) : null;
+      const pagePickerTriggerLabel = selectedPage ? escapeHtml(selectedPage.name) : 'Select page';
+      const pagePickerTriggerAvatar = selectedPage
+        ? `<span class="calendar-campaign-picker-trigger-avatar"><img src="${projectAvatarUrl(selectedPage.id)}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="calendar-campaign-picker-avatar-placeholder" style="display:none;">${(selectedPage.name || 'P').charAt(0).toUpperCase()}</span></span>`
+        : '';
+      const pagePickerItems = pages.length ? pages.map((p) => {
+        const sel = selectedProjectId != null && String(p.id) === String(selectedProjectId);
+        return `<button type="button" class="calendar-campaign-picker-item ${sel ? 'calendar-campaign-picker-item-selected' : ''}" data-page-id="${escapeHtml(String(p.id))}" title="${escapeHtml(p.name)}">
+          <span class="calendar-campaign-picker-item-avatar"><img src="${projectAvatarUrl(p.id)}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="calendar-campaign-picker-avatar-placeholder" style="display:none;">${(p.name || 'P').charAt(0).toUpperCase()}</span></span>
+          <span class="calendar-campaign-picker-item-name">${escapeHtml(p.name)}</span>
+        </button>`;
+      }).join('') : '<div class="calendar-campaign-picker-empty">No pages</div>';
+      const scopeFilterHtml = `
+        <div class="calendar-scope-wrap" style="display:flex;flex-wrap:wrap;align-items:center;gap:0.75rem;margin-bottom:1rem;">
+          <label class="field" style="display:inline-flex;align-items:center;gap:0.5rem;">
+            <span>Show:</span>
+            <select id="calendarScopeFilter" class="field-select" style="min-width:11rem;">
+              <option value="all" ${scopeFilter === 'all' ? 'selected' : ''}>All posts</option>
+              <option value="campaign" ${scopeFilter === 'campaign' ? 'selected' : ''}>Per campaign</option>
+              <option value="page" ${scopeFilter === 'page' ? 'selected' : ''}>Per page</option>
+            </select>
+          </label>
+          <label class="field calendar-scope-campaign" id="calendarScopeCampaignWrap" style="display:${scopeFilter === 'campaign' ? 'inline-flex' : 'none'};align-items:center;gap:0.5rem;">
+            <span>Campaign:</span>
+            <div class="calendar-campaign-picker" id="calendarCampaignPicker">
+              <button type="button" class="calendar-campaign-picker-trigger field-select" id="calendarCampaignPickerTrigger" aria-haspopup="listbox" aria-expanded="false">
+                ${campaignPickerTriggerAvatar ? `<span class="calendar-campaign-picker-trigger-avatar">${campaignPickerTriggerAvatar}</span>` : ''}
+                <span class="calendar-campaign-picker-trigger-label">${campaignPickerTriggerLabel}</span>
+              </button>
+              <div class="calendar-campaign-picker-dropdown" id="calendarCampaignPickerDropdown" role="listbox" hidden>
+                ${campaignPickerItems}
+              </div>
+            </div>
+          </label>
+          <label class="field calendar-scope-page" id="calendarScopePageWrap" style="display:${scopeFilter === 'page' ? 'inline-flex' : 'none'};align-items:center;gap:0.5rem;">
+            <span>Page:</span>
+            <div class="calendar-campaign-picker calendar-page-picker" id="calendarPagePicker">
+              <button type="button" class="calendar-campaign-picker-trigger field-select" id="calendarPagePickerTrigger" aria-haspopup="listbox" aria-expanded="false">
+                ${pagePickerTriggerAvatar || ''}
+                <span class="calendar-campaign-picker-trigger-label">${pagePickerTriggerLabel}</span>
+              </button>
+              <div class="calendar-campaign-picker-dropdown" id="calendarPagePickerDropdown" role="listbox" hidden>
+                ${pagePickerItems}
+              </div>
+            </div>
+          </label>
+        </div>`;
+
+      let contentHtml = '';
+      if (selectedDay) {
+        const dayItems = (itemsByDateKey[selectedDay] || []).slice().sort((a, b) => {
+          const ta = a.scheduledAt ? new Date(a.scheduledAt).getTime() : 0;
+          const tb = b.scheduledAt ? new Date(b.scheduledAt).getTime() : 0;
+          return ta - tb;
+        });
+        const [y, m, d] = selectedDay.split('-');
+        const dayDate = new Date(parseInt(y, 10), parseInt(m, 10) - 1, parseInt(d, 10));
+        const dayLabel = dayDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+        contentHtml = `
+          <div class="calendar-day-detail">
+            <p class="back-link-wrap"><button type="button" class="btn btn-ghost btn-sm" id="calendarDayBack">← Back to calendar</button></p>
+            <h2>Posts on ${escapeHtml(dayLabel)}</h2>
+            <p class="hint">${dayItems.length} post${dayItems.length !== 1 ? 's' : ''} scheduled.</p>
+            <div class="calendar-header calendar-header-day">
+              <span class="calendar-time">Time</span>
+              <span class="calendar-project">Page</span>
+              <span class="calendar-campaign">Campaign</span>
+            </div>
+            <ul class="calendar-list" id="calendarList">${dayItems.map((it) => {
+              const inTz = it.scheduledAt ? formatScheduledAtInTz(it.scheduledAt, displayTz) : null;
+              const timeDisplay = inTz ? inTz.timeLabel : formatTimeAMPM(it.time);
+              const pageAvatar = it.projectId ? `<span class="calendar-page-avatar"><img src="${projectAvatarUrl(it.projectId)}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="calendar-page-avatar-placeholder" style="display:none;">${(it.projectName || 'P').charAt(0).toUpperCase()}</span></span>` : '';
+              return `<li class="calendar-item"><span class="calendar-time">${timeDisplay}</span><span class="calendar-project">${pageAvatar}<span class="calendar-page-name">${escapeHtml(it.projectName)}</span></span><span class="calendar-campaign"><a href="#/campaigns/${it.campaignId}" class="calendar-campaign-link">${escapeHtml(it.campaignName)}</a></span></li>`;
+            }).join('')}</ul>
+          </div>`;
+      } else if (viewMode === 'calendar') {
+        const weekDays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        const cells = [];
+        for (let i = 0; i < startWeekday; i++) cells.push({ empty: true });
+        for (let d = 1; d <= daysInMonth; d++) {
+          const dateKey = monthYear + '-' + String(monthIndex + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+          const count = (itemsByDateKey[dateKey] || []).length;
+          const isToday = dateKey === todayKey;
+          cells.push({ dateKey, day: d, count, isToday });
+        }
+        const totalCells = 42;
+        while (cells.length < totalCells) cells.push({ empty: true });
+        contentHtml = `
+          <div class="calendar-month-nav" style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem;">
+            <button type="button" class="btn btn-ghost btn-sm" id="calendarMonthPrev">← Prev</button>
+            <span class="calendar-month-title" style="font-weight:600;min-width:180px;text-align:center;">${monthName} ${monthYear}</span>
+            <button type="button" class="btn btn-ghost btn-sm" id="calendarMonthNext">Next →</button>
+          </div>
+          <div class="calendar-grid-wrap">
+            <div class="calendar-grid-header">${weekDays.map((w) => `<span class="calendar-cell calendar-cell-head">${w}</span>`).join('')}</div>
+            <div class="calendar-grid-body">${cells.map((c) => {
+              if (c.empty) return '<span class="calendar-cell calendar-cell-empty"></span>';
+              const clickable = c.count > 0 ? ' calendar-cell-clickable' : '';
+              const todayClass = c.isToday ? ' calendar-cell-today' : '';
+              return `<button type="button" class="calendar-cell calendar-cell-day${clickable}${todayClass}" data-date-key="${escapeHtml(c.dateKey)}"><span class="calendar-cell-day-num">${c.day}</span>${c.count > 0 ? `<span class="calendar-cell-count">${c.count} post${c.count !== 1 ? 's' : ''}</span>` : ''}</button>`;
+            }).join('')}</div>
+          </div>`;
+      } else {
+        contentHtml = `
+          <div class="calendar-header">
+            <span class="calendar-date">Date</span>
+            <span class="calendar-time">Time</span>
+            <span class="calendar-project">Page</span>
+            <span class="calendar-campaign">Campaign</span>
+          </div>
+          <ul class="calendar-list" id="calendarList">${items.map((it) => {
+            const inTz = it.scheduledAt ? formatScheduledAtInTz(it.scheduledAt, displayTz) : null;
+            const dateDisplay = inTz ? inTz.dateLabel : formatCalendarDate(it.date);
+            const timeDisplay = inTz ? inTz.timeLabel : formatTimeAMPM(it.time);
+            const pageAvatar = it.projectId ? `<span class="calendar-page-avatar"><img src="${projectAvatarUrl(it.projectId)}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="calendar-page-avatar-placeholder" style="display:none;">${(it.projectName || 'P').charAt(0).toUpperCase()}</span></span>` : '';
+            return `<li class="calendar-item"><span class="calendar-date">${dateDisplay}</span><span class="calendar-time">${timeDisplay}</span><span class="calendar-project">${pageAvatar}<span class="calendar-page-name">${escapeHtml(it.projectName)}</span></span><span class="calendar-campaign"><a href="#/campaigns/${it.campaignId}" class="calendar-campaign-link">${escapeHtml(it.campaignName)}</a></span></li>`;
+          }).join('')}</ul>`;
+      }
+
+      const formatTodoDate = (isoStr) => {
+        if (!isoStr) return '';
+        const d = new Date(isoStr + 'T12:00:00Z');
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      };
+      const recurringListHtml = recurringTodo.length ? recurringTodo.map((t) => {
+        const dateStr = formatTodoDate(t.stopDate);
+        const daysText = t.daysUntil != null && t.daysUntil <= 365 ? (t.daysUntil === 0 ? 'today' : t.daysUntil === 1 ? '1 day' : `${t.daysUntil} days`) : '';
+        const suffix = daysText ? ` (${daysText})` : '';
+        return `<li class="calendar-todo-item"><span class="calendar-todo-text"><span class="calendar-todo-page">${escapeHtml(t.pageName || 'Page')}</span> will stop posting on <strong>${escapeHtml(dateStr)}</strong>${escapeHtml(suffix)}.</span></li>`;
+      }).join('') : '<li class="calendar-todo-empty">All recurring pages are scheduled.</li>';
+      const campaignGapListHtml = campaignGapTodo.length ? campaignGapTodo.map((t) => {
+        const days = t.daysBefore;
+        const dayText = days === 1 ? '1 day' : `${days} days`;
+        return `<li class="calendar-todo-item"><span class="calendar-todo-text"><span class="calendar-todo-page">${escapeHtml(t.pageName || 'Page')}</span> stops posting <strong>${dayText} before the campaign is over</strong>.</span></li>`;
+      }).join('') : '<li class="calendar-todo-empty">No campaign pages missing posts.</li>';
+      const todoSectionHtml = `
+        <section class="card calendar-todo-card">
+          <h2>To do</h2>
+          <p class="hint">Keep recurring pages scheduled and add posts to campaigns so pages don’t stop before campaign end. Lists are ordered by urgency (soonest first).</p>
+          <div class="calendar-todo-columns">
+            <div class="calendar-todo-column">
+              <h3 class="calendar-todo-column-title">Recurring pages</h3>
+              <ol class="calendar-todo-list calendar-todo-list-numbered" id="calendarTodoRecurring">${recurringListHtml}</ol>
+            </div>
+            <div class="calendar-todo-column">
+              <h3 class="calendar-todo-column-title">Missing posts (campaigns)</h3>
+              <ol class="calendar-todo-list calendar-todo-list-numbered" id="calendarTodoCampaignGap">${campaignGapListHtml}</ol>
+            </div>
+          </div>
+        </section>`;
+
+      main.innerHTML = `
+        <section class="card">
+          <h1>Calendar</h1>
+          <p class="calendar-total">Total scheduled: <strong>${total}</strong></p>
+          <p class="hint">Upcoming scheduled posts across all pages (deployed campaigns only). Each campaign is capped by its smallest photo folder.${tzHint}</p>
+          ${scopeFilterHtml}
+          <div class="calendar-actions">
+            <button type="button" class="btn btn-secondary" id="calendarExportCsvBtn">Export CSV</button>
+            <div class="calendar-view-toggle" role="group" aria-label="View">
+              <button type="button" class="btn btn-icon ${viewMode === 'list' ? 'btn-primary' : 'btn-secondary'}" id="calendarViewList" title="List view" aria-label="List view"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></button>
+              <button type="button" class="btn btn-icon ${viewMode === 'calendar' ? 'btn-primary' : 'btn-secondary'}" id="calendarViewCalendar" title="Calendar view" aria-label="Calendar view"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
+            </div>
+          </div>
+          <div id="calendarContent">${contentHtml}</div>
+        </section>
+        ${todoSectionHtml}`;
+
+      main.querySelector('#calendarScopeFilter')?.addEventListener('change', (e) => {
+        scopeFilter = e.target.value || 'all';
+        if (scopeFilter === 'campaign' && campaigns.length) selectedCampaignId = selectedCampaignId != null ? selectedCampaignId : (campaigns[0] && campaigns[0].id);
+        else if (scopeFilter === 'campaign') selectedCampaignId = null;
+        if (scopeFilter === 'page' && pages.length) selectedProjectId = selectedProjectId != null ? selectedProjectId : (pages[0] && pages[0].id);
+        else if (scopeFilter === 'page') selectedProjectId = null;
+        if (scopeFilter !== 'campaign') selectedCampaignId = null;
+        if (scopeFilter !== 'page') selectedProjectId = null;
+        selectedDay = null;
+        render();
+      });
+      const pickerTrigger = main.querySelector('#calendarCampaignPickerTrigger');
+      const pickerDropdown = main.querySelector('#calendarCampaignPickerDropdown');
+      if (pickerTrigger && pickerDropdown) {
+        pickerTrigger.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const isOpen = !pickerDropdown.hidden;
+          pickerDropdown.hidden = isOpen;
+          pickerTrigger.setAttribute('aria-expanded', !isOpen);
+          if (!isOpen) {
+            setTimeout(() => {
+              const closeHandler = (ev) => {
+                const dd = document.getElementById('calendarCampaignPickerDropdown');
+                const picker = document.getElementById('calendarCampaignPicker');
+                if (dd && picker && !picker.contains(ev.target)) {
+                  dd.hidden = true;
+                  pickerTrigger.setAttribute('aria-expanded', 'false');
+                  document.removeEventListener('click', closeHandler);
+                }
+              };
+              document.addEventListener('click', closeHandler);
+            }, 0);
+          }
+        });
+        main.querySelector('#calendarCampaignPickerDropdown')?.querySelectorAll('.calendar-campaign-picker-item[data-campaign-id]').forEach((btn) => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const id = btn.dataset.campaignId;
+            selectedCampaignId = id || null;
+            pickerDropdown.hidden = true;
+            pickerTrigger.setAttribute('aria-expanded', 'false');
+            selectedDay = null;
+            render();
+          });
+        });
+      }
+      const pagePickerTrigger = main.querySelector('#calendarPagePickerTrigger');
+      const pagePickerDropdown = main.querySelector('#calendarPagePickerDropdown');
+      if (pagePickerTrigger && pagePickerDropdown) {
+        pagePickerTrigger.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const isOpen = !pagePickerDropdown.hidden;
+          pagePickerDropdown.hidden = isOpen;
+          pagePickerTrigger.setAttribute('aria-expanded', !isOpen);
+          if (!isOpen) {
+            setTimeout(() => {
+              const closeHandler = (ev) => {
+                const dd = document.getElementById('calendarPagePickerDropdown');
+                const picker = document.getElementById('calendarPagePicker');
+                if (dd && picker && !picker.contains(ev.target)) {
+                  dd.hidden = true;
+                  pagePickerTrigger.setAttribute('aria-expanded', 'false');
+                  document.removeEventListener('click', closeHandler);
+                }
+              };
+              document.addEventListener('click', closeHandler);
+            }, 0);
+          }
+        });
+        main.querySelector('#calendarPagePickerDropdown')?.querySelectorAll('.calendar-campaign-picker-item[data-page-id]').forEach((btn) => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const id = btn.dataset.pageId;
+            selectedProjectId = id || null;
+            pagePickerDropdown.hidden = true;
+            pagePickerTrigger.setAttribute('aria-expanded', 'false');
+            selectedDay = null;
+            render();
+          });
+        });
+      }
+      main.querySelector('#calendarViewList')?.addEventListener('click', () => { viewMode = 'list'; selectedDay = null; render(); });
+      main.querySelector('#calendarViewCalendar')?.addEventListener('click', () => { viewMode = 'calendar'; selectedDay = null; render(); });
+      main.querySelector('#calendarExportCsvBtn')?.addEventListener('click', doExportCsv);
+      main.querySelector('#calendarMonthPrev')?.addEventListener('click', () => { calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1); render(); });
+      main.querySelector('#calendarMonthNext')?.addEventListener('click', () => { calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1); render(); });
+      main.querySelector('#calendarDayBack')?.addEventListener('click', () => { selectedDay = null; render(); });
+      main.querySelectorAll('.calendar-cell-day[data-date-key]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const key = btn.dataset.dateKey;
+          if (key && (itemsByDateKey[key] || []).length > 0) { selectedDay = key; render(); }
+        });
+      });
+    }
+
+    if (!allItems.length) {
+      const formatTodoDateEmpty = (isoStr) => { if (!isoStr) return ''; const d = new Date(isoStr + 'T12:00:00Z'); return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); };
+      const recurringEmptyHtml = recurringTodo.length ? recurringTodo.map((t) => `<li class="calendar-todo-item"><span class="calendar-todo-text"><span class="calendar-todo-page">${escapeHtml(t.pageName || 'Page')}</span> will stop posting on <strong>${escapeHtml(formatTodoDateEmpty(t.stopDate))}</strong>.</span></li>`).join('') : '<li class="calendar-todo-empty">All recurring pages are scheduled.</li>';
+      const campaignGapEmptyHtml = campaignGapTodo.length ? campaignGapTodo.map((t) => { const days = t.daysBefore; const dayText = days === 1 ? '1 day' : `${days} days`; return `<li class="calendar-todo-item"><span class="calendar-todo-text"><span class="calendar-todo-page">${escapeHtml(t.pageName || 'Page')}</span> stops posting <strong>${dayText} before the campaign is over</strong>.</span></li>`; }).join('') : '<li class="calendar-todo-empty">No campaign pages missing posts.</li>';
+      const emptyTodoSection = `<section class="card calendar-todo-card"><h2>To do</h2><p class="hint">Keep recurring pages scheduled and add posts to campaigns. Lists are ordered by urgency (soonest first).</p><div class="calendar-todo-columns"><div class="calendar-todo-column"><h3 class="calendar-todo-column-title">Recurring pages</h3><ol class="calendar-todo-list calendar-todo-list-numbered">${recurringEmptyHtml}</ol></div><div class="calendar-todo-column"><h3 class="calendar-todo-column-title">Missing posts (campaigns)</h3><ol class="calendar-todo-list calendar-todo-list-numbered">${campaignGapEmptyHtml}</ol></div></div></section>`;
+      main.innerHTML = '<section class="card"><h1>Calendar</h1><p class="calendar-total">Total scheduled: <strong>0</strong></p><p class="hint">Upcoming scheduled posts (deployed campaigns only). Set your timezone in Settings to see times in your preferred zone.</p><div class="calendar-actions"><button type="button" class="btn btn-secondary" id="calendarExportCsvBtn">Export CSV</button><div class="calendar-view-toggle" role="group"><button type="button" class="btn btn-icon btn-secondary" id="calendarViewList" title="List view" aria-label="List view"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></button><button type="button" class="btn btn-icon btn-secondary" id="calendarViewCalendar" title="Calendar view" aria-label="Calendar view"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button></div></div><p class="empty">No scheduled runs. Deploy campaigns and set times to see them here.</p></section>' + emptyTodoSection;
+      main.querySelector('#calendarViewList')?.addEventListener('click', () => {});
+      main.querySelector('#calendarViewCalendar')?.addEventListener('click', () => {});
       return;
     }
-    main.innerHTML = `
-      <section class="card">
-        <h1>Calendar</h1>
-        <p class="calendar-total">Total scheduled: <strong>${total}</strong></p>
-        <p class="hint">Upcoming scheduled posts across all pages (deployed campaigns only). Each campaign is capped by its smallest photo folder.</p>
-        <div class="calendar-header">
-          <span class="calendar-date">Date</span>
-          <span class="calendar-time">Time</span>
-          <span class="calendar-project">Page</span>
-          <span class="calendar-campaign">Campaign</span>
-        </div>
-        <ul class="calendar-list" id="calendarList"></ul>
-      </section>
-    `;
-    const list = document.getElementById('calendarList');
-    list.innerHTML = items.map((it) => `
-      <li class="calendar-item">
-        <span class="calendar-date">${formatCalendarDate(it.date)}</span>
-        <span class="calendar-time">${formatTimeAMPM(it.time)}</span>
-        <span class="calendar-project">${escapeHtml(it.projectName)}</span>
-        <span class="calendar-campaign"><a href="#/campaigns/${it.campaignId}" class="calendar-campaign-link">${escapeHtml(it.campaignName)}</a></span>
-      </li>
-    `).join('');
+    render();
   }).catch(() => {
     document.getElementById('main').innerHTML = '<section class="card"><p>Could not load calendar.</p></section>';
   });
@@ -4178,18 +5159,54 @@ function renderCalendar() {
 function render() {
   projectContentMode = false;
   projectContentProjectId = null;
+  fromRecurringPages = false;
   updateNavActive();
   const route = getRoute();
   if (route.view === 'dashboard') renderDashboard();
+  else if (route.view === 'pages') renderPages();
+  else if (route.view === 'recurringPages') renderRecurringPages();
   else if (route.view === 'calendar') renderCalendar();
   else if (route.view === 'logins') renderLogins();
+  else if (route.view === 'settings') renderSettings();
   else if (route.view === 'campaigns') renderCampaigns();
   else if (route.view === 'campaignDetail') renderCampaignDetail(route.campaignId);
   else if (route.view === 'trends') renderTrends();
   else if (route.view === 'trendNew') renderTrendNew(route.campaignId);
   else if (route.view === 'trendDetail') renderTrendDetail(route.trendId);
   else if (route.view === 'project') renderProject(route.projectId);
-  else if (route.view === 'projectUsed') renderProjectUsed(route.projectId);
+  else if (route.view === 'recurringPageDetail' || route.view === 'recurringPageContentList' || route.view === 'recurringPageContent' || route.view === 'recurringPageContentFolder' || route.view === 'recurringPageContentFolderPhotos' || route.view === 'recurringPageContentFolderVideos') {
+    const pid = route.projectId;
+    apiRecurringPagesGet().then((recurringIds) => {
+      if (!recurringIds || !recurringIds.some((id) => String(id) === String(pid))) {
+        window.location.hash = '#/recurring-pages';
+        render();
+        return;
+      }
+      fromRecurringPages = true;
+      projectContentMode = true;
+      projectContentProjectId = pid;
+      apiCampaigns(pid).then((campaigns) => {
+        let recurring = Array.isArray(campaigns) ? campaigns.find((c) => c.name === 'Recurring posts') : null;
+        if (!recurring) {
+          apiCreateCampaign(pid, 'Recurring posts', { isPageNative: true }).then((c) => {
+            recurring = c;
+            runRecurringPageContentRoute(route, pid, recurring.id);
+          }).catch(() => {
+            window.location.hash = '#/recurring-pages';
+            render();
+          });
+        } else {
+          runRecurringPageContentRoute(route, pid, recurring.id);
+        }
+      }).catch(() => {
+        window.location.hash = '#/recurring-pages';
+        render();
+      });
+    }).catch(() => {
+      window.location.hash = '#/recurring-pages';
+      render();
+    });
+  }
   else if (route.view === 'projectContentList' || route.view === 'projectContent' || route.view === 'projectContentFolder' || route.view === 'projectContentFolderPhotos' || route.view === 'projectContentFolderVideos') {
     const pid = route.projectId;
     const ptId = route.postTypeId;
@@ -4218,32 +5235,45 @@ function render() {
   else if (route.view === 'campaignFolderVideos') renderCampaignFolderVideos(route.projectId, route.campaignId, route.folderNum, route.postTypeId);
 }
 
-// --- Settings modal (event delegation so buttons always work) ---
-function closeSettingsModal() {
-  const el = document.getElementById('settingsModal');
-  if (el) el.hidden = true;
-  const btn = document.getElementById('openSettings');
-  if (btn) btn.classList.remove('active');
-}
-
-async function openSettingsModal() {
+// --- Settings page (full page, not modal) ---
+async function populateSettingsPage(main) {
+  if (!main) return;
   try {
     const c = await apiConfig();
-    const input = document.getElementById('baseUrl');
+    const input = main.querySelector('#settingsBaseUrl');
     if (input) input.value = c.baseUrl || window.location.origin;
-    const blotatoInput = document.getElementById('blotatoApiKey');
+    const blotatoInput = main.querySelector('#settingsBlotatoApiKey');
     if (blotatoInput) blotatoInput.value = c.blotatoApiKey || '';
-    const usernameEl = document.getElementById('settingsUsername');
-    const teamListEl = document.getElementById('settingsTeamList');
-    const teamErrorEl = document.getElementById('settingsTeamError');
-    const profileSection = document.getElementById('settingsProfileSection');
-    const teamSection = document.getElementById('settingsTeamSection');
+    const tzSelect = main.querySelector('#settingsTimezoneSelect');
+    if (tzSelect) {
+      const serverTz = c.timezone || 'America/New_York';
+      const current = getCalendarDisplayTimezone(serverTz);
+      tzSelect.innerHTML = CALENDAR_TIMEZONES.map((z) => `<option value="${escapeHtml(z.id)}" ${z.id === current ? 'selected' : ''}>${escapeHtml(z.label)}</option>`).join('');
+    }
+    const presetsListEl = main.querySelector('#settingsPresetsList');
+    if (presetsListEl) {
+      try {
+        const presets = await apiTextPresets();
+        presetsListEl.innerHTML = Array.isArray(presets) && presets.length
+          ? presets.map((p) => `<li class="settings-presets-item"><span>${escapeHtml(p.name || p.id)}</span> <button type="button" class="btn btn-ghost btn-sm" data-delete-preset="${escapeHtml(p.id)}" aria-label="Delete">Delete</button></li>`).join('')
+          : '<li class="hint">No presets yet. Add a video file above.</li>';
+      } catch (_) {
+        presetsListEl.innerHTML = '<li class="hint">Could not load presets.</li>';
+      }
+    }
+    const presetErr = main.querySelector('#settingsPresetError');
+    if (presetErr) presetErr.hidden = true;
+    const usernameEl = main.querySelector('#settingsUsername');
+    const teamListEl = main.querySelector('#settingsTeamList');
+    const teamErrorEl = main.querySelector('#settingsTeamError');
+    const profileSection = main.querySelector('#settingsProfileSection');
+    const teamSection = main.querySelector('#settingsTeamSection');
     if (profileSection) profileSection.hidden = !supabaseClient;
     if (teamSection) teamSection.hidden = !supabaseClient;
     if (teamErrorEl) teamErrorEl.hidden = true;
-    const usernameEditWrap = document.getElementById('settingsUsernameEditWrap');
-    const settingsUsernameInput = document.getElementById('settingsUsernameInput');
-    const settingsUsernameError = document.getElementById('settingsUsernameError');
+    const usernameEditWrap = main.querySelector('#settingsUsernameEditWrap');
+    const settingsUsernameInput = main.querySelector('#settingsUsernameInput');
+    const settingsUsernameError = main.querySelector('#settingsUsernameError');
     if (usernameEditWrap) usernameEditWrap.hidden = true;
     if (settingsUsernameError) settingsUsernameError.hidden = true;
     if (supabaseClient && usernameEl) {
@@ -4265,115 +5295,205 @@ async function openSettingsModal() {
         teamListEl.innerHTML = '<li class="hint">Could not load team.</li>';
       }
     }
-    const el = document.getElementById('settingsModal');
-    if (el) el.hidden = false;
-    const btn = document.getElementById('openSettings');
-    if (btn) btn.classList.add('active');
-  } catch (_) {
-    closeSettingsModal();
-  }
+  } catch (_) {}
 }
 
-document.getElementById('openSettings').addEventListener('click', openSettingsModal);
+function renderSettings() {
+  setBreadcrumb({ view: 'settings' });
+  const main = document.getElementById('main');
+  main.innerHTML = `
+    <section class="card">
+      <p class="back-link-wrap"><a href="#/" class="nav-link">← Back to Home</a></p>
+      <h1>Settings</h1>
+      <div id="settingsProfileSection" class="settings-section">
+        <h3 class="settings-subtitle">Your username</h3>
+        <div class="settings-username-row">
+          <span id="settingsUsername" class="settings-username"></span>
+          <button type="button" class="btn btn-secondary btn-sm" id="settingsUsernameEdit">Edit</button>
+        </div>
+        <div id="settingsUsernameEditWrap" class="settings-username-edit-wrap" hidden>
+          <input type="text" id="settingsUsernameInput" placeholder="Username" class="settings-team-input" maxlength="50" />
+          <div class="settings-username-edit-actions">
+            <button type="button" class="btn btn-primary" id="settingsUsernameSave">Save</button>
+            <button type="button" class="btn btn-ghost" id="settingsUsernameCancel">Cancel</button>
+          </div>
+          <p id="settingsUsernameError" class="auth-error" hidden></p>
+        </div>
+        <p class="hint">Share this username so others can add you as a team member or to a campaign.</p>
+      </div>
+      <div id="settingsTeamSection" class="settings-section">
+        <h3 class="settings-subtitle">Team members</h3>
+        <p class="hint">Add people by their username to give them access to your account.</p>
+        <div class="settings-team-add">
+          <input type="text" id="settingsTeamUsername" placeholder="Username" class="settings-team-input" />
+          <button type="button" class="btn btn-secondary" id="settingsTeamAddBtn">Add</button>
+        </div>
+        <p id="settingsTeamError" class="auth-error" hidden></p>
+        <ul id="settingsTeamList" class="settings-team-list"></ul>
+      </div>
+      <div class="settings-section" id="settingsTextPresetsSection">
+        <h3 class="settings-subtitle">Text presets (lyric overlays)</h3>
+        <p class="hint">Upload short video clips with moving text (e.g. from CapCut). They can be applied on top of videos in post types for lyric-style content. Use MP4/MOV with transparency for best results.</p>
+        <div class="settings-presets-add">
+          <input type="text" id="settingsPresetName" placeholder="Preset name" class="settings-team-input" maxlength="80" />
+          <input type="file" id="settingsPresetFile" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" style="max-width:220px;" />
+          <button type="button" class="btn btn-secondary" id="settingsPresetAddBtn">Add preset</button>
+        </div>
+        <p id="settingsPresetError" class="auth-error" hidden></p>
+        <ul id="settingsPresetsList" class="settings-presets-list"></ul>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-subtitle">Display timezone</h3>
+        <label class="field">
+          <span>Timezone for calendar and schedule times</span>
+          <select id="settingsTimezoneSelect" class="field-select" style="min-width:100%;max-width:320px;"></select>
+        </label>
+        <p class="hint">Calendar and campaign schedule times will be shown in this timezone.</p>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-subtitle">App config</h3>
+        <label class="field">
+          <span>Base URL (for webContentUrls)</span>
+          <input type="url" id="settingsBaseUrl" placeholder="https://your-server.com" />
+        </label>
+        <p class="hint">Set this to your public URL (e.g. ngrok or your domain) so Blotato can fetch generated images.</p>
+        <label class="field">
+          <span>Blotato API Key</span>
+          <input type="password" id="settingsBlotatoApiKey" placeholder="Your Blotato API key" autocomplete="off" />
+        </label>
+        <p class="hint">Required for auto-posting to TikTok. Get it from your Blotato dashboard.</p>
+      </div>
+      <div class="settings-page-actions">
+        <button type="button" class="btn btn-primary" id="saveSettings">Save</button>
+      </div>
+    </section>
+  `;
+  populateSettingsPage(main);
 
-document.getElementById('settingsUsernameEdit').addEventListener('click', () => {
-  const wrap = document.getElementById('settingsUsernameEditWrap');
-  const display = document.getElementById('settingsUsername');
-  const input = document.getElementById('settingsUsernameInput');
-  const errEl = document.getElementById('settingsUsernameError');
-  if (wrap && input) {
-    if (errEl) errEl.hidden = true;
-    input.value = (display?.textContent || '').trim();
-    wrap.hidden = false;
-    input.focus();
-  }
-});
-
-document.getElementById('settingsUsernameCancel').addEventListener('click', () => {
-  const wrap = document.getElementById('settingsUsernameEditWrap');
-  const errEl = document.getElementById('settingsUsernameError');
-  if (wrap) wrap.hidden = true;
-  if (errEl) errEl.hidden = true;
-});
-
-document.getElementById('settingsUsernameSave').addEventListener('click', async () => {
-  const input = document.getElementById('settingsUsernameInput');
-  const display = document.getElementById('settingsUsername');
-  const wrap = document.getElementById('settingsUsernameEditWrap');
-  const errEl = document.getElementById('settingsUsernameError');
-  if (!supabaseClient || !input || !display || !wrap) return;
-  const raw = (input.value || '').trim();
-  const username = raw.toLowerCase().replace(/[^a-z0-9_]/g, '');
-  if (!username) {
-    if (errEl) { errEl.textContent = 'Username is required (letters, numbers, underscore).'; errEl.hidden = false; }
-    return;
-  }
-  if (username.length < 2) {
-    if (errEl) { errEl.textContent = 'Username must be at least 2 characters.'; errEl.hidden = false; }
-    return;
-  }
-  if (errEl) errEl.hidden = true;
-  try {
-    const { data: { user } } = await supabaseClient.auth.getUser();
-    if (!user) throw new Error('Not signed in');
-    const { data, error } = await supabaseClient.from('profiles').update({ username, updated_at: new Date().toISOString() }).eq('id', user.id).select('username').maybeSingle();
-    if (error) throw error;
-    if (display) display.textContent = (data && data.username) ? data.username : username;
-    wrap.hidden = true;
-  } catch (err) {
-    if (errEl) {
-      errEl.textContent = err.message?.includes('unique') || err.code === '23505' ? 'That username is already taken.' : (err.message || 'Failed to update username');
-      errEl.hidden = false;
+  main.querySelector('#settingsUsernameEdit')?.addEventListener('click', () => {
+    const wrap = main.querySelector('#settingsUsernameEditWrap');
+    const display = main.querySelector('#settingsUsername');
+    const input = main.querySelector('#settingsUsernameInput');
+    const errEl = main.querySelector('#settingsUsernameError');
+    if (wrap && input) {
+      if (errEl) errEl.hidden = true;
+      input.value = (display?.textContent || '').trim();
+      wrap.hidden = false;
+      input.focus();
     }
-  }
-});
-
-document.getElementById('settingsTeamAddBtn').addEventListener('click', async () => {
-  const input = document.getElementById('settingsTeamUsername');
-  const errEl = document.getElementById('settingsTeamError');
-  if (!input || !errEl) return;
-  const username = input.value.trim();
-  if (!username) return;
-  errEl.hidden = true;
-  try {
-    await apiTeamAdd(username);
-    input.value = '';
-    openSettingsModal();
-  } catch (err) {
-    errEl.textContent = err.message || 'Failed to add';
-    errEl.hidden = false;
-  }
-});
-
-document.getElementById('settingsModal').addEventListener('click', async (e) => {
-  if (e.target.id === 'closeSettings') {
-    closeSettingsModal();
-    return;
-  }
-  if (e.target.id === 'saveSettings') {
-    const input = document.getElementById('baseUrl');
-    const blotatoInput = document.getElementById('blotatoApiKey');
-    const baseUrl = (input && input.value.trim()) || window.location.origin;
-    const blotatoApiKey = (blotatoInput && blotatoInput.value.trim()) || '';
-    apiSaveConfig({ baseUrl, blotatoApiKey }).then(closeSettingsModal).catch(() => closeSettingsModal());
-    return;
-  }
-  if (e.target.dataset.removeTeam) {
-    const userId = e.target.dataset.removeTeam;
-    const errEl = document.getElementById('settingsTeamError');
+  });
+  main.querySelector('#settingsUsernameCancel')?.addEventListener('click', () => {
+    const wrap = main.querySelector('#settingsUsernameEditWrap');
+    const errEl = main.querySelector('#settingsUsernameError');
+    if (wrap) wrap.hidden = true;
+    if (errEl) errEl.hidden = true;
+  });
+  main.querySelector('#settingsUsernameSave')?.addEventListener('click', async () => {
+    const input = main.querySelector('#settingsUsernameInput');
+    const display = main.querySelector('#settingsUsername');
+    const wrap = main.querySelector('#settingsUsernameEditWrap');
+    const errEl = main.querySelector('#settingsUsernameError');
+    if (!supabaseClient || !input || !display || !wrap) return;
+    const raw = (input.value || '').trim();
+    const username = raw.toLowerCase().replace(/[^a-z0-9_]/g, '');
+    if (!username) {
+      if (errEl) { errEl.textContent = 'Username is required (letters, numbers, underscore).'; errEl.hidden = false; }
+      return;
+    }
+    if (username.length < 2) {
+      if (errEl) { errEl.textContent = 'Username must be at least 2 characters.'; errEl.hidden = false; }
+      return;
+    }
     if (errEl) errEl.hidden = true;
     try {
-      await apiTeamRemove(userId);
-      openSettingsModal();
+      const { data: { user } } = await supabaseClient.auth.getUser();
+      if (!user) throw new Error('Not signed in');
+      const { data, error } = await supabaseClient.from('profiles').update({ username, updated_at: new Date().toISOString() }).eq('id', user.id).select('username').maybeSingle();
+      if (error) throw error;
+      if (display) display.textContent = (data && data.username) ? data.username : username;
+      wrap.hidden = true;
     } catch (err) {
-      if (errEl) { errEl.textContent = err.message || 'Failed to remove'; errEl.hidden = false; }
+      if (errEl) {
+        errEl.textContent = err.message?.includes('unique') || err.code === '23505' ? 'That username is already taken.' : (err.message || 'Failed to update username');
+        errEl.hidden = false;
+      }
     }
-    return;
-  }
-  if (e.target.id === 'settingsModal') {
-    closeSettingsModal();
-  }
-});
+  });
+  main.querySelector('#settingsTeamAddBtn')?.addEventListener('click', async () => {
+    const input = main.querySelector('#settingsTeamUsername');
+    const errEl = main.querySelector('#settingsTeamError');
+    if (!input || !errEl) return;
+    const username = input.value.trim();
+    if (!username) return;
+    errEl.hidden = true;
+    try {
+      await apiTeamAdd(username);
+      input.value = '';
+      populateSettingsPage(main);
+    } catch (err) {
+      errEl.textContent = err.message || 'Failed to add';
+      errEl.hidden = false;
+    }
+  });
+  main.querySelector('#saveSettings')?.addEventListener('click', () => {
+    const tzSelect = main.querySelector('#settingsTimezoneSelect');
+    if (tzSelect) try { localStorage.setItem(CALENDAR_TZ_STORAGE_KEY, tzSelect.value); } catch (_) {}
+    const input = main.querySelector('#settingsBaseUrl');
+    const blotatoInput = main.querySelector('#settingsBlotatoApiKey');
+    const baseUrl = (input && input.value.trim()) || window.location.origin;
+    const blotatoApiKey = (blotatoInput && blotatoInput.value.trim()) || '';
+    apiSaveConfig({ baseUrl, blotatoApiKey }).then(() => {
+      const btn = main.querySelector('#saveSettings');
+      if (btn) { btn.textContent = 'Saved'; setTimeout(() => { btn.textContent = 'Save'; }, 2000); }
+    }).catch(() => {});
+  });
+  main.addEventListener('click', async (e) => {
+    if (e.target.dataset.removeTeam) {
+      const userId = e.target.dataset.removeTeam;
+      const errEl = main.querySelector('#settingsTeamError');
+      if (errEl) errEl.hidden = true;
+      try {
+        await apiTeamRemove(userId);
+        populateSettingsPage(main);
+      } catch (err) {
+        if (errEl) { errEl.textContent = err.message || 'Failed to remove'; errEl.hidden = false; }
+      }
+      return;
+    }
+    if (e.target.dataset.deletePreset) {
+      const id = e.target.dataset.deletePreset;
+      const errEl = main.querySelector('#settingsPresetError');
+      if (errEl) errEl.hidden = true;
+      apiDeleteTextPreset(id).then(() => populateSettingsPage(main)).catch((err) => {
+        const el = main.querySelector('#settingsPresetError');
+        if (el) { el.textContent = err.message || 'Failed to delete'; el.hidden = false; }
+      });
+    }
+  });
+  main.querySelector('#settingsPresetAddBtn')?.addEventListener('click', async () => {
+    const nameInput = main.querySelector('#settingsPresetName');
+    const fileInput = main.querySelector('#settingsPresetFile');
+    const errEl = main.querySelector('#settingsPresetError');
+    if (!nameInput || !fileInput || !errEl) return;
+    const name = (nameInput.value || '').trim() || 'Text preset';
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) {
+      errEl.textContent = 'Choose a video file (MP4, MOV, or WebM).';
+      errEl.hidden = false;
+      return;
+    }
+    errEl.hidden = true;
+    try {
+      await apiCreateTextPreset(name, file);
+      nameInput.value = '';
+      fileInput.value = '';
+      populateSettingsPage(main);
+    } catch (err) {
+      errEl.textContent = err.message || 'Upload failed';
+      errEl.hidden = false;
+    }
+  });
+}
 
 // --- Logout ---
 document.getElementById('logoutBtn').addEventListener('click', async () => {
@@ -4382,6 +5502,35 @@ document.getElementById('logoutBtn').addEventListener('click', async () => {
     checkAuthAndRender();
   }
 });
+
+// --- Waffle menu ---
+(function () {
+  const btn = document.getElementById('navWaffleBtn');
+  const popup = document.getElementById('wafflePopup');
+  if (!btn || !popup) return;
+  function closeWaffle() {
+    popup.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+  }
+  function openWaffle() {
+    popup.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+  }
+  function toggleWaffle() {
+    if (popup.hidden) openWaffle(); else closeWaffle();
+  }
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleWaffle();
+  });
+  document.addEventListener('click', (e) => {
+    if (!popup.hidden && !popup.contains(e.target) && !btn.contains(e.target)) closeWaffle();
+  });
+  window.addEventListener('hashchange', closeWaffle);
+  popup.querySelectorAll('.waffle-popup-item').forEach((link) => {
+    link.addEventListener('click', () => { closeWaffle(); });
+  });
+})();
 
 // --- Init ---
 async function init() {

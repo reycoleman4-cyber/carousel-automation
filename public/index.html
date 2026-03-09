@@ -53,12 +53,23 @@
           <a href="#/" class="nav-link nav-home" id="navHome" title="Home" aria-label="Home">
             <svg class="nav-home-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
           </a>
-          <div class="nav-right">
+          <div class="nav-center">
+            <a href="#/pages" class="nav-link" id="navPages">Pages</a>
             <a href="#/campaigns" class="nav-link" id="navCampaigns">Campaigns</a>
-            <a href="#/calendar" class="nav-link" id="navCalendar">Calendar</a>
             <a href="#/trends" class="nav-link" id="navTrends">Trends</a>
-            <a href="#/logins" class="nav-link" id="navLogins">Logins</a>
-            <button type="button" class="btn btn-ghost" id="openSettings">Settings</button>
+            <a href="#/recurring-pages" class="nav-link" id="navRecurringPages">Recurring Pages</a>
+          </div>
+          <div class="nav-right">
+            <div class="waffle-wrap">
+              <button type="button" class="btn btn-ghost btn-icon" id="navWaffleBtn" title="Menu" aria-label="Menu" aria-haspopup="true" aria-expanded="false">
+                <svg class="nav-waffle-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="6"/><rect x="15" y="3" width="6" height="6"/><rect x="3" y="15" width="6" height="6"/><rect x="15" y="15" width="6" height="6"/></svg>
+              </button>
+              <div class="waffle-popup" id="wafflePopup" hidden role="menu" aria-label="Menu options">
+                <a href="#/calendar" class="waffle-popup-item" role="menuitem">Calendar</a>
+                <a href="#/logins" class="waffle-popup-item" role="menuitem">Logins</a>
+                <a href="#/settings" class="waffle-popup-item" role="menuitem">Settings</a>
+              </div>
+            </div>
             <button type="button" class="btn btn-ghost" id="logoutBtn">Log out</button>
           </div>
         </nav>
@@ -236,55 +247,6 @@
       <div id="joinCampaignList" class="new-campaign-pages"></div>
       <div class="modal-actions" style="margin-top:1rem;">
         <button type="button" class="btn btn-secondary" id="joinCampaignCancel">Cancel</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="modal-overlay" id="settingsModal" hidden>
-    <div class="modal modal-settings">
-      <h2>Settings</h2>
-      <div id="settingsProfileSection" class="settings-section">
-        <h3 class="settings-subtitle">Your username</h3>
-        <div class="settings-username-row">
-          <span id="settingsUsername" class="settings-username"></span>
-          <button type="button" class="btn btn-secondary btn-sm" id="settingsUsernameEdit">Edit</button>
-        </div>
-        <div id="settingsUsernameEditWrap" class="settings-username-edit-wrap" hidden>
-          <input type="text" id="settingsUsernameInput" placeholder="Username" class="settings-team-input" maxlength="50" />
-          <div class="settings-username-edit-actions">
-            <button type="button" class="btn btn-primary" id="settingsUsernameSave">Save</button>
-            <button type="button" class="btn btn-ghost" id="settingsUsernameCancel">Cancel</button>
-          </div>
-          <p id="settingsUsernameError" class="auth-error" hidden></p>
-        </div>
-        <p class="hint">Share this username so others can add you as a team member or to a campaign.</p>
-      </div>
-      <div id="settingsTeamSection" class="settings-section">
-        <h3 class="settings-subtitle">Team members</h3>
-        <p class="hint">Add people by their username to give them access to your account.</p>
-        <div class="settings-team-add">
-          <input type="text" id="settingsTeamUsername" placeholder="Username" class="settings-team-input" />
-          <button type="button" class="btn btn-secondary" id="settingsTeamAddBtn">Add</button>
-        </div>
-        <p id="settingsTeamError" class="auth-error" hidden></p>
-        <ul id="settingsTeamList" class="settings-team-list"></ul>
-      </div>
-      <div class="settings-section">
-        <h3 class="settings-subtitle">App config</h3>
-        <label class="field">
-          <span>Base URL (for webContentUrls)</span>
-          <input type="url" id="baseUrl" placeholder="https://your-server.com" />
-        </label>
-        <p class="hint">Set this to your public URL (e.g. ngrok or your domain) so Blotato can fetch generated images.</p>
-        <label class="field">
-          <span>Blotato API Key</span>
-          <input type="password" id="blotatoApiKey" placeholder="Your Blotato API key" autocomplete="off" />
-        </label>
-        <p class="hint">Required for auto-posting to TikTok. Get it from your Blotato dashboard.</p>
-      </div>
-      <div class="modal-actions">
-        <button type="button" class="btn btn-secondary" id="closeSettings">Cancel</button>
-        <button type="button" class="btn btn-primary" id="saveSettings">Save</button>
       </div>
     </div>
   </div>

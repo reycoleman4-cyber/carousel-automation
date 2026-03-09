@@ -9,7 +9,6 @@ const ROOT = path.resolve(__dirname);
 
 const UPLOADS_BUCKET = 'uploads';
 const GENERATED_BUCKET = 'generated';
-const USED_BUCKET = 'used';
 
 let supabase = null;
 const useSupabase = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -41,11 +40,6 @@ function generatedStoragePath(projectId, campaignId, filename, userId) {
   return `${pathPrefix(userId)}${projectId}/${campaignId}/${filename}`;
 }
 
-/** Storage path for used: [userId/]projectId/filename */
-function usedStoragePath(projectId, filename, userId) {
-  return `${pathPrefix(userId)}${projectId}/${filename}`;
-}
-
 async function ensureBucket(bucket) {
   if (!supabase) return;
   try {
@@ -60,7 +54,6 @@ async function initStorage() {
   if (supabase) {
     await ensureBucket(UPLOADS_BUCKET);
     await ensureBucket(GENERATED_BUCKET);
-    await ensureBucket(USED_BUCKET);
   }
 }
 
@@ -82,13 +75,6 @@ function localGeneratedPath(projectId, campaignId, userId) {
   return userId
     ? path.join(genBase, String(userId).replace(/[/\\]/g, '_'), String(projectId), String(campaignId))
     : path.join(genBase, String(projectId), String(campaignId));
-}
-
-function localUsedPath(projectId, userId) {
-  const uploadsBase = process.env.UPLOADS_DIR ? path.resolve(process.env.UPLOADS_DIR) : path.join(getDataRoot(), 'uploads');
-  return userId
-    ? path.join(uploadsBase, String(userId).replace(/[/\\]/g, '_'), String(projectId), 'used')
-    : path.join(uploadsBase, String(projectId), 'used');
 }
 
 // --- List files ---
@@ -123,7 +109,7 @@ async function listImages(projectId, campaignId, postTypeId, folderNum, userId) 
 }
 
 async function listVideos(projectId, campaignId, postTypeId, folderNum, userId) {
-  return listFolderFiles(projectId, campaignId, postTypeId, folderNum, ['.mp4', '.mov', '.webm', '.avi', '.mkv'], userId);
+  return listFolderFiles(projectId, campaignId, postTypeId, folderNum, ['.mp4', '.mov', '.webm', '.avi', '.mkv', '.m4v'], userId);
 }
 
 // --- Read file (for processing) ---
@@ -266,28 +252,6 @@ async function readGeneratedBuffer(projectId, campaignId, filename, userId) {
   return fs.readFile(path.join(dir, filename));
 }
 
-// --- Move to used ---
-async function moveToUsed(projectId, campaignId, sourceInfo, folderNum, userId) {
-  const ext = sourceInfo.filename ? path.extname(sourceInfo.filename) : '.jpg';
-  const nameWithoutExt = sourceInfo.filename ? path.basename(sourceInfo.filename, ext) : 'img';
-  const newName = `${Date.now()}-c${campaignId}-f${folderNum}-${nameWithoutExt}${ext}`;
-
-  if (supabase) {
-    const buffer = await readFileBuffer(projectId, campaignId, sourceInfo.postTypeId, folderNum, sourceInfo.filename, userId);
-    const storagePath = usedStoragePath(projectId, newName, userId);
-    await supabase.storage.from(USED_BUCKET).upload(storagePath, buffer, { contentType: 'image/jpeg', upsert: true });
-    await deleteFile(projectId, campaignId, sourceInfo.postTypeId, folderNum, sourceInfo.filename, userId);
-    return newName;
-  }
-  const srcDir = localUploadsPath(projectId, campaignId, sourceInfo.postTypeId, folderNum, userId);
-  const srcPath = path.join(srcDir, sourceInfo.filename);
-  const used = localUsedPath(projectId, userId);
-  await fs.mkdir(used, { recursive: true });
-  const destPath = path.join(used, newName);
-  await fs.rename(srcPath, destPath);
-  return newName;
-}
-
 module.exports = {
   useSupabase: () => useSupabase,
   initStorage,
@@ -302,9 +266,7 @@ module.exports = {
   uploadGenerated,
   getGeneratedUrl,
   readGeneratedBuffer,
-  moveToUsed,
   folderStoragePath,
   localUploadsPath,
   localGeneratedPath,
-  localUsedPath,
 };
