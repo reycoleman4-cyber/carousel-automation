@@ -309,8 +309,9 @@ function apiDeleteCampaignById(campaignId) {
     return text ? JSON.parse(text) : {};
   });
 }
-function apiCampaignFolders(projectId, campaignId, postTypeId) {
-  const url = postTypeId ? `${API}/api/projects/${projectId}/campaigns/${campaignId}/folders?postTypeId=${encodeURIComponent(postTypeId)}` : `${API}/api/projects/${projectId}/campaigns/${campaignId}/folders`;
+function apiCampaignFolders(projectId, campaignId, postTypeId, opts) {
+  let url = postTypeId ? `${API}/api/projects/${projectId}/campaigns/${campaignId}/folders?postTypeId=${encodeURIComponent(postTypeId)}` : `${API}/api/projects/${projectId}/campaigns/${campaignId}/folders`;
+  if (opts && opts.cacheBust) url += (url.includes('?') ? '&' : '?') + '_=' + Date.now();
   return apiWithAuth(url).then((r) => r.json());
 }
 function apiAddFolder(projectId, campaignId, postTypeId) {
@@ -373,7 +374,34 @@ function apiUploadProjectAvatar(projectId, file) {
 function projectAvatarUrl(projectId) {
   return `${API}/api/projects/${projectId}/avatar?t=${Date.now()}`;
 }
-function apiCampaignUpload(projectId, campaignId, folderNum, files, postTypeId, mediaType) {
+
+/** Show the global upload progress bar at the bottom; percent 0–100, label e.g. "Uploading videos…" */
+function showUploadProgress(percent, label) {
+  const wrap = document.getElementById('uploadProgressWrap');
+  const fill = document.getElementById('uploadProgressFill');
+  const pctEl = document.getElementById('uploadProgressPct');
+  const labelEl = document.getElementById('uploadProgressLabel');
+  if (!wrap) return;
+  const p = Math.min(100, Math.max(0, percent));
+  if (fill) fill.style.width = p + '%';
+  if (pctEl) pctEl.textContent = Math.round(p) + '%';
+  if (labelEl) labelEl.textContent = label || 'Uploading…';
+  wrap.hidden = false;
+  wrap.setAttribute('data-visible', 'true');
+}
+
+/** Hide the upload progress bar */
+function hideUploadProgress() {
+  const wrap = document.getElementById('uploadProgressWrap');
+  if (!wrap) return;
+  wrap.setAttribute('data-visible', 'false');
+  wrap.hidden = true;
+  const fill = document.getElementById('uploadProgressFill');
+  if (fill) fill.style.width = '0%';
+}
+
+/** XHR-based campaign folder upload with progress. Same args as apiCampaignUpload; returns same Promise result. */
+function campaignUploadWithProgress(projectId, campaignId, folderNum, files, postTypeId, mediaType) {
   const form = new FormData();
   const isVideo = mediaType === 'video' || mediaType === 'video_text';
   const videoExt = /\.(mp4|mov|webm|avi|mkv|m4v)(\?|$)/i;
@@ -399,19 +427,68 @@ function apiCampaignUpload(projectId, campaignId, folderNum, files, postTypeId, 
   if (postTypeId) url += `&postTypeId=${encodeURIComponent(postTypeId)}`;
   if (mediaType === 'video') url += `&mediaType=video`;
   if (mediaType === 'video_text') url += `&mediaType=video_text`;
-  return apiWithAuth(url, {
-    method: 'POST',
-    body: form,
-  }).then(async (r) => {
-    const text = await r.text();
-    if (!r.ok) {
-      const err = tryParse(text);
-      const msg = err?.error || (text && text.length < 200 ? text : null) || `Upload failed (${r.status})`;
-      throw new Error(msg);
-    }
-    return text ? JSON.parse(text) : {};
-  });
+  const label = isVideo ? 'Uploading videos…' : 'Uploading photos…';
+  showUploadProgress(0, label);
+  return getAuthHeaders().then((headers) => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      if (headers.Authorization) xhr.setRequestHeader('Authorization', headers.Authorization);
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) showUploadProgress((e.loaded / e.total) * 100, label);
+        else showUploadProgress(0, label);
+      });
+      xhr.addEventListener('load', () => {
+        hideUploadProgress();
+        const text = xhr.responseText || '';
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(text ? JSON.parse(text) : {}); } catch (_) { resolve({}); }
+        } else {
+          let msg;
+          if (xhr.status === 502 || xhr.status === 503 || xhr.status === 504) {
+            msg = 'The server took too long or couldn\'t process your upload. Try a smaller or shorter file, or try again in a moment.';
+          } else {
+            const err = tryParse(text);
+            msg = err?.error || (text && text.length < 200 ? text : null) || `Upload failed (${xhr.status})`;
+          }
+          reject(new Error(msg));
+        }
+      });
+      xhr.addEventListener('error', () => { hideUploadProgress(); reject(new Error('Upload failed. Check your connection and try again.')); });
+      xhr.addEventListener('abort', () => { hideUploadProgress(); reject(new Error('Upload cancelled')); });
+      xhr.send(form);
+    });
+  }).catch((err) => { hideUploadProgress(); return Promise.reject(err); });
 }
+
+const ENCODING_JOB_POLL_MS = 2500;
+const ENCODING_JOB_POLL_MAX = 120000; // 2 min
+
+function pollEncodingJobUntilDone(jobId) {
+  const start = Date.now();
+  function poll() {
+    return apiWithAuth(`${API}/api/encoding/jobs/${jobId}`).then((r) => r.json()).then((job) => {
+      if (job.status === 'completed') {
+        const url = job.result && job.result.url;
+        return {
+          webContentUrls: url ? [url] : [],
+          webContentBase64: [],
+          blotatoSent: !!(job.payload && job.payload.sendToBlotato),
+          blotatoSentAsDraft: !!(job.payload && job.payload.draft),
+          blotatoError: null,
+        };
+      }
+      if (job.status === 'failed') {
+        const err = job.result && job.result.error;
+        return Promise.reject(new Error(err || 'Encoding failed'));
+      }
+      if (Date.now() - start > ENCODING_JOB_POLL_MAX) return Promise.reject(new Error('Encoding timed out'));
+      return new Promise((resolve) => setTimeout(resolve, ENCODING_JOB_POLL_MS)).then(poll);
+    });
+  }
+  return poll();
+}
+
 function apiCampaignRun(projectId, campaignId, textStylePerFolder, textOptionsPerFolder, sendAsDraft, addMusicToCarousel, postTypeId) {
   const body = {};
   if (postTypeId) body.postTypeId = postTypeId;
@@ -423,7 +500,10 @@ function apiCampaignRun(projectId, campaignId, textStylePerFolder, textOptionsPe
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  }).then((r) => r.json());
+  }).then((r) => r.json()).then((data) => {
+    if (data.jobId && data.status === 'queued') return pollEncodingJobUntilDone(data.jobId);
+    return data;
+  });
 }
 function apiTextStylePreview(projectId, campaignId, folderNum, textStyle, sampleText, textOptionsPerFolder, signal, postTypeId) {
   const body = { folderNum, textStyle, sampleText };
@@ -553,6 +633,46 @@ function apiTrendPageFolderUpload(trendId, pageIndex, folderNum, files) {
     if (!r.ok) return r.json().then((d) => Promise.reject(new Error(d && d.error ? d.error : 'Upload failed')));
     return r.json();
   });
+}
+
+/** XHR-based trend folder upload with progress bar. */
+function trendUploadWithProgress(trendId, pageIndex, folderNum, files) {
+  const form = new FormData();
+  for (const f of files) form.append('photo', f);
+  const url = `${API}/api/trends/${trendId}/pages/${pageIndex}/folders/${folderNum}/upload`;
+  showUploadProgress(0, 'Uploading photos…');
+  return getAuthHeaders().then((headers) => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      if (headers.Authorization) xhr.setRequestHeader('Authorization', headers.Authorization);
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) showUploadProgress((e.loaded / e.total) * 100, 'Uploading photos…');
+        else showUploadProgress(0, 'Uploading photos…');
+      });
+      xhr.addEventListener('load', () => {
+        hideUploadProgress();
+        const text = xhr.responseText || '';
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(text ? JSON.parse(text) : {}); } catch (_) { resolve({}); }
+        } else {
+          let msg;
+          if (xhr.status === 502 || xhr.status === 503 || xhr.status === 504) {
+            msg = 'The server took too long or couldn\'t process your upload. Try a smaller or shorter file, or try again in a moment.';
+          } else {
+            try {
+              const d = JSON.parse(text);
+              msg = d && d.error ? d.error : `Upload failed (${xhr.status})`;
+            } catch (_) { msg = `Upload failed (${xhr.status})`; }
+          }
+          reject(new Error(msg));
+        }
+      });
+      xhr.addEventListener('error', () => { hideUploadProgress(); reject(new Error('Upload failed. Check your connection and try again.')); });
+      xhr.addEventListener('abort', () => { hideUploadProgress(); reject(new Error('Upload cancelled')); });
+      xhr.send(form);
+    });
+  }).catch((err) => { hideUploadProgress(); return Promise.reject(err); });
 }
 function trendFolderImageUrl(trendId, pageIndex, folderNum, filename) {
   return `${API}/api/trends/${trendId}/pages/${pageIndex}/folders/${folderNum}/images/${encodeURIComponent(filename)}`;
@@ -781,7 +901,11 @@ let fromRecurringPages = false;
 function getRoute() {
   const hash = window.location.hash.slice(1) || '/';
   const parts = hash.split('/').filter(Boolean);
-  if (parts[0] === 'calendar') return { view: 'calendar' };
+  if (parts[0] === 'calendar') {
+    const datePart = parts[1];
+    if (datePart && /^\d{4}-\d{2}-\d{2}$/.test(datePart)) return { view: 'calendar', calendarDate: datePart };
+    return { view: 'calendar' };
+  }
   if (parts[0] === 'logins') return { view: 'logins' };
   if (parts[0] === 'settings') return { view: 'settings' };
   if (parts[0] === 'campaigns') {
@@ -1380,7 +1504,12 @@ function renderRecurringPages() {
           <p class="hint" style="margin-bottom:12px;">Select one page to add. You can add more after.</p>
           <label class="field" style="margin-bottom:1rem;">
             <span class="field-label">Page</span>
-            <select id="addRecurringPageSelect" class="field-select"></select>
+            <div class="calendar-campaign-picker" id="addRecurringPagePicker" style="width:100%;min-width:0;">
+              <button type="button" class="calendar-campaign-picker-trigger field-select" id="addRecurringPagePickerTrigger" style="width:100%;" aria-haspopup="listbox" aria-expanded="false">
+                <span class="calendar-campaign-picker-trigger-label" id="addRecurringPagePickerLabel">Select a page…</span>
+              </button>
+              <div class="calendar-campaign-picker-dropdown" id="addRecurringPagePickerDropdown" role="listbox" hidden></div>
+            </div>
           </label>
           <div style="display:flex;gap:8px;justify-content:flex-end;">
             <button type="button" class="btn btn-ghost" id="addRecurringPageCancel">Cancel</button>
@@ -1418,20 +1547,80 @@ function renderRecurringPages() {
     });
     const addBtn = document.getElementById('addRecurringPageBtn');
     const modal = document.getElementById('addRecurringPageModal');
-    const selectEl = document.getElementById('addRecurringPageSelect');
+    const pickerTrigger = document.getElementById('addRecurringPagePickerTrigger');
+    const pickerLabel = document.getElementById('addRecurringPagePickerLabel');
+    const pickerDropdown = document.getElementById('addRecurringPagePickerDropdown');
     const cancelBtn = document.getElementById('addRecurringPageCancel');
     const confirmBtn = document.getElementById('addRecurringPageConfirm');
-    if (addBtn && modal && selectEl) {
+    let selectedRecurringPageId = null;
+    if (addBtn && modal && pickerTrigger && pickerDropdown) {
       addBtn.onclick = () => {
-        selectEl.innerHTML = availableToAdd.length
-          ? availableToAdd.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')
-          : '<option value="">No pages available</option>';
-        selectEl.disabled = availableToAdd.length === 0;
+        selectedRecurringPageId = null;
+        pickerDropdown.hidden = true;
+        pickerTrigger.setAttribute('aria-expanded', 'false');
+        if (pickerLabel) {
+          pickerLabel.textContent = 'Select a page…';
+          const existingAvatar = pickerTrigger.querySelector('.calendar-campaign-picker-trigger-avatar');
+          if (existingAvatar) existingAvatar.remove();
+        }
+        if (availableToAdd.length) {
+          const itemsHtml = availableToAdd.map((p) => {
+            const avatarHtml = p.hasAvatar
+              ? `<img src="${projectAvatarUrl(p.id)}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="calendar-campaign-picker-avatar-placeholder" style="display:none;">${(p.name || 'P').charAt(0).toUpperCase()}</span>`
+              : `<span class="calendar-campaign-picker-avatar-placeholder">${(p.name || 'P').charAt(0).toUpperCase()}</span>`;
+            return `<button type="button" class="calendar-campaign-picker-item" data-page-id="${escapeHtml(String(p.id))}" title="${escapeHtml(p.name)}">
+              <span class="calendar-campaign-picker-item-avatar">${avatarHtml}</span>
+              <span class="calendar-campaign-picker-item-name">${escapeHtml(p.name)}</span>
+            </button>`;
+          }).join('');
+          pickerDropdown.innerHTML = itemsHtml;
+          pickerDropdown.querySelectorAll('.calendar-campaign-picker-item[data-page-id]').forEach((btn) => {
+            btn.onclick = (e) => {
+              e.stopPropagation();
+              const id = btn.dataset.pageId;
+              selectedRecurringPageId = id || null;
+              const p = availableToAdd.find((x) => String(x.id) === String(id));
+              if (p && pickerLabel) {
+                pickerLabel.textContent = p.name || '';
+                const oldAvatar = pickerTrigger.querySelector('.calendar-campaign-picker-trigger-avatar');
+                if (oldAvatar) oldAvatar.remove();
+                const avatarHtml = p.hasAvatar
+                  ? `<img src="${projectAvatarUrl(p.id)}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="calendar-campaign-picker-avatar-placeholder" style="display:none;">${(p.name || 'P').charAt(0).toUpperCase()}</span>`
+                  : `<span class="calendar-campaign-picker-avatar-placeholder">${(p.name || 'P').charAt(0).toUpperCase()}</span>`;
+                const avatarSpan = document.createElement('span');
+                avatarSpan.className = 'calendar-campaign-picker-trigger-avatar';
+                avatarSpan.innerHTML = avatarHtml;
+                pickerTrigger.insertBefore(avatarSpan, pickerLabel);
+              }
+              pickerDropdown.hidden = true;
+              pickerTrigger.setAttribute('aria-expanded', 'false');
+            };
+          });
+        } else {
+          pickerDropdown.innerHTML = '<div class="calendar-campaign-picker-empty">No pages available</div>';
+        }
         modal.hidden = false;
       };
-      cancelBtn.onclick = () => { modal.hidden = true; };
+      pickerTrigger.onclick = (e) => {
+        e.stopPropagation();
+        if (availableToAdd.length === 0) return;
+        const isOpen = !pickerDropdown.hidden;
+        pickerDropdown.hidden = isOpen;
+        pickerTrigger.setAttribute('aria-expanded', !isOpen);
+        if (!isOpen) {
+          const closeHandler = (ev) => {
+            if (pickerDropdown && !document.getElementById('addRecurringPagePicker')?.contains(ev.target)) {
+              pickerDropdown.hidden = true;
+              pickerTrigger.setAttribute('aria-expanded', 'false');
+              document.removeEventListener('click', closeHandler);
+            }
+          };
+          setTimeout(() => document.addEventListener('click', closeHandler), 0);
+        }
+      };
+      cancelBtn.onclick = () => { modal.hidden = true; pickerDropdown.hidden = true; };
       confirmBtn.onclick = () => {
-        const id = selectEl.value && selectEl.value.trim();
+        const id = selectedRecurringPageId && String(selectedRecurringPageId).trim();
         if (!id || availableToAdd.length === 0) return;
         apiRecurringPagesAdd(id).then(() => {
           modal.hidden = true;
@@ -1448,7 +1637,7 @@ function renderRecurringPages() {
 
 function renderProject(projectId) {
   const pid = projectId;
-  Promise.all([apiProject(pid), apiCampaigns(pid)]).then(([project, campaigns]) => {
+  Promise.all([apiProject(pid), apiCampaigns(pid), apiConfig()]).then(([project, campaigns, config]) => {
     if (!project) {
       document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap"><a href="#/pages" class="nav-link">← Back to Pages</a></p><p>Page not found.</p></section>';
       setBreadcrumb({ view: 'project', projectId: pid }, null, null);
@@ -1581,8 +1770,12 @@ function renderProject(projectId) {
         if (!db) return -1;
         return da.localeCompare(db);
       });
+      const serverTz = (config && config.timezone) || 'America/New_York';
+      const userTz = getCalendarDisplayTimezone(serverTz);
       list.innerHTML = sorted.map((c) => {
-        const timesLabel = (c.scheduleTimes || []).map(formatTimeAMPM).filter(Boolean).join(', ') || '—';
+        const rawTimes = c.scheduleTimes || [];
+        const displayTimes = rawTimes.map((t) => convertTimeForDisplay(serverTz, userTz, t || '10:00'));
+        const timesLabel = displayTimes.map(formatTimeAMPM).filter(Boolean).join(', ') || '—';
         const releaseLabel = c.releaseDate ? `Release: ${formatReleaseDate(c.releaseDate)}` : '';
         const displayName = campaignDisplayTitle(project, c);
         const campAvatar = `<div class="list-card-avatar campaign-avatar campaign-avatar-square"><img src="${campaignAvatarUrl(c.id)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(displayName || 'C').charAt(0).toUpperCase()}</span></div>`;
@@ -1639,7 +1832,7 @@ function openFolderModal(projectId, campaignId, folderNum, folderLabel, onClose)
   modal.hidden = false;
 
   function refresh() {
-    apiCampaignFolders(projectId, campaignId).then((data) => {
+    apiCampaignFolders(projectId, campaignId, undefined, { cacheBust: true }).then((data) => {
       const list = (data.folders || {})[`folder${folderNum}`] || [];
       photos.innerHTML = list.map((item) => {
         const filename = typeof item === 'string' ? item : (item && item.filename) || '';
@@ -1667,7 +1860,9 @@ function openFolderModal(projectId, campaignId, folderNum, folderLabel, onClose)
   addInput.onchange = (e) => {
     const files = e.target.files;
     if (!files?.length) return;
-    apiCampaignUpload(projectId, campaignId, folderNum, files).then(() => { refresh(); if (onClose) onClose(); }).catch(() => showAlert('Upload failed'));
+    campaignUploadWithProgress(projectId, campaignId, folderNum, files)
+      .then(() => { setTimeout(() => { refresh(); if (onClose) onClose(); }, 80); })
+      .catch(() => showAlert('Upload failed'));
     addInput.value = '';
   };
 
@@ -1750,12 +1945,14 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
           </div>
           <div class="campaign-page-title-wrap">
             <h1 id="campaignName" class="campaign-detail-name-editable" title="Double-click to rename">${escapeHtml(campaign.name)}</h1>
-            <h2 id="postTypeHeader" class="post-type-header-editable" title="Double-click to edit label">${escapeHtml((campaign.postTypes || []).find((p) => p.id === ptId)?.name || ptId)}</h2>
+            <h2 id="postTypeHeader" class="post-type-header-editable post-type-name-centered" title="Double-click to edit label">${escapeHtml((campaign.postTypes || []).find((p) => p.id === ptId)?.name || ptId)}</h2>
+            <label class="deploy-toggle deploy-toggle-under-name">
+              <input type="checkbox" id="deployed" ${isPostTypeDeployed(campaign, pid, ptId) ? 'checked' : ''} />
+              <span>Deployed</span>
+            </label>
           </div>
         </div>
-        <div class="campaign-page-header-right">
-          <label class="deploy-toggle"><input type="checkbox" id="deployed" ${isPostTypeDeployed(campaign, pid, ptId) ? 'checked' : ''} /><span>Deployed</span></label>
-        </div>
+        <div class="campaign-page-header-right"></div>
       </div>
     </section>
     <section class="card">
@@ -1765,7 +1962,7 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
     </section>
     <section class="card">
       <h2>Schedule</h2>
-      <p class="hint">How often videos will be posted (if deployed).</p>
+      <p class="hint">How often videos will be posted (if deployed). Times use your selected timezone (Settings → Display timezone).</p>
       <div class="schedule-content">
         <label class="checkbox-field"><input type="checkbox" id="scheduleEnabled" ${campaign.scheduleEnabled !== false ? 'checked' : ''} /><span>Run on schedule</span></label>
         <div class="schedule-date-range">
@@ -1828,9 +2025,9 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
     if (dropzone && input) {
       dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('dragover'); };
       dropzone.ondragleave = () => dropzone.classList.remove('dragover');
-      dropzone.ondrop = (e) => { e.preventDefault(); dropzone.classList.remove('dragover'); const files = e.dataTransfer.files; if (files?.length) apiCampaignUpload(pid, cid, num, files, ptId, 'video').then(updateFolderCounts).catch((err) => showAlert(err.message || 'Upload failed')); };
+      dropzone.ondrop = (e) => { e.preventDefault(); dropzone.classList.remove('dragover'); const files = e.dataTransfer.files; if (files?.length) campaignUploadWithProgress(pid, cid, num, files, ptId, 'video').then(updateFolderCounts).catch((err) => showAlert(err.message || 'Upload failed')); };
     }
-    if (input) input.onchange = (e) => { const files = e.target.files; if (files?.length) apiCampaignUpload(pid, cid, num, files, ptId, 'video').then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed')); };
+    if (input) input.onchange = (e) => { const files = e.target.files; if (files?.length) campaignUploadWithProgress(pid, cid, num, files, ptId, 'video').then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed')); };
   }
   updateFolderCounts();
   document.getElementById('deployed').onchange = (e) => apiUpdateCampaign(pid, cid, { ...campaignData, deployed: e.target.checked }, ptId).then((c) => { campaignData = c; });
@@ -1984,7 +2181,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
             <option value="">Select a preset…</option>
           </select>
         </label>
-        <p class="hint">Use a moving-text preset from Settings → Text presets. The preview below shows the preset on your video.</p>
+        <p class="hint">Use a moving-text preset from Settings → Text presets, or choose "Randomly select preset" to pick one at random each run. The preview below shows the preset on your video.</p>
       </div>
       <div id="textOverlayOnscreenPanel" class="text-overlay-panel" style="display:${initialTextOverlayMode === 'onscreen' ? 'block' : 'none'};">
         <p class="hint">One line from your text options is chosen per run and overlaid using the styling below.</p>
@@ -2025,7 +2222,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
     </section>
     <section class="card">
       <h2>Schedule</h2>
-      <p class="hint">When this campaign runs (if deployed).</p>
+      <p class="hint">When this campaign runs (if deployed). Times use your selected timezone (Settings → Display timezone).</p>
       <div class="schedule-content">
         <label class="checkbox-field"><input type="checkbox" id="scheduleEnabled" ${campaign.scheduleEnabled !== false ? 'checked' : ''} /><span>Run on schedule</span></label>
         <div class="schedule-date-range">
@@ -2102,12 +2299,12 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
       e.preventDefault();
       dropzone.classList.remove('dragover');
       const files = e.dataTransfer.files;
-      if (files?.length) apiCampaignUpload(pid, cid, 1, files, ptId, 'video_text').then(updateFolderCounts).catch((err) => showAlert(err.message || 'Upload failed'));
+      if (files?.length) campaignUploadWithProgress(pid, cid, 1, files, ptId, 'video_text').then(updateFolderCounts).catch((err) => showAlert(err.message || 'Upload failed'));
     };
   }
   if (input) input.onchange = (e) => {
     const files = e.target.files;
-    if (files?.length) apiCampaignUpload(pid, cid, 1, files, ptId, 'video_text').then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed'));
+    if (files?.length) campaignUploadWithProgress(pid, cid, 1, files, ptId, 'video_text').then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed'));
   };
 
   document.getElementById('deployed').onchange = (e) => apiUpdateCampaign(pid, cid, { ...campaignData, deployed: e.target.checked }, ptId).then((c) => { campaignData = c; });
@@ -2191,13 +2388,13 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
   const presetSelect = document.getElementById('textPresetSelect');
   if (presetSelect) {
     apiTextPresets().then((presets) => {
-      presetSelect.innerHTML = '<option value="">Select a preset…</option>' + (Array.isArray(presets) ? presets.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name || p.id)}</option>`).join('') : '');
+      presetSelect.innerHTML = '<option value="">Select a preset…</option><option value="random">Randomly select preset</option>' + (Array.isArray(presets) ? presets.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name || p.id)}</option>`).join('') : '');
       const pt = (campaignData.postTypes || []).find((p) => p.id === ptId);
       if (pt && pt.textPresetId) presetSelect.value = pt.textPresetId;
     }).catch(() => {});
     presetSelect.onchange = () => {
       const val = presetSelect.value || null;
-      apiUpdatePostType(pid, cid, ptId, { textPresetId: val }).then((c) => { campaignData = c; }).catch((err) => showAlert(err.message || 'Failed to update preset'));
+      apiUpdatePostType(pid, cid, ptId, { textPresetId: val === '' ? null : val }).then((c) => { campaignData = c; }).catch((err) => showAlert(err.message || 'Failed to update preset'));
     };
   }
 
@@ -2624,7 +2821,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
 
       <section class="card">
         <h2>Schedule</h2>
-        <p class="hint">When this campaign runs (if deployed). Set date range, times per day, and days of week.</p>
+        <p class="hint">When this campaign runs (if deployed). Set date range, times per day, and days of week. Times use your selected timezone (Settings → Display timezone).</p>
         <div class="schedule-content">
           <label class="checkbox-field">
             <input type="checkbox" id="scheduleEnabled" ${campaign.scheduleEnabled !== false ? 'checked' : ''} />
@@ -2722,13 +2919,13 @@ function renderCampaign(projectId, campaignId, postTypeId) {
           dropzone.classList.remove('dragover');
           const files = e.dataTransfer.files;
           if (!files?.length) return;
-          apiCampaignUpload(pid, cid, num, files, ptId).then(updateFolderCounts).catch((err) => showAlert(err.message || 'Upload failed'));
+          campaignUploadWithProgress(pid, cid, num, files, ptId).then(updateFolderCounts).catch((err) => showAlert(err.message || 'Upload failed'));
         };
       }
       if (input) input.onchange = (e) => {
         const files = e.target.files;
         if (!files?.length) return;
-        apiCampaignUpload(pid, cid, num, files, ptId).then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed'));
+        campaignUploadWithProgress(pid, cid, num, files, ptId).then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed'));
       };
       const deleteBtn = dropzone && dropzone.querySelector('.dropzone-delete');
       if (deleteBtn) deleteBtn.onclick = (e) => {
@@ -3121,7 +3318,7 @@ function renderCampaignFolderPhotos(projectId, campaignId, folderNum, postTypeId
       });
     }
     function refresh() {
-      apiCampaignFolders(pid, cid, ptId).then((data) => {
+      apiCampaignFolders(pid, cid, ptId, { cacheBust: true }).then((data) => {
         const imgs = (data.folders || {})[`folder${fnum}`] || [];
         if (!grid) return;
         revokeObjectUrlsInGrid();
@@ -3156,7 +3353,9 @@ function renderCampaignFolderPhotos(projectId, campaignId, folderNum, postTypeId
     addInput.onchange = (e) => {
       const files = e.target.files;
       if (!files?.length) return;
-      apiCampaignUpload(pid, cid, fnum, files, ptId).then(refresh).catch(() => showAlert('Upload failed'));
+      campaignUploadWithProgress(pid, cid, fnum, files, ptId)
+        .then(() => { setTimeout(refresh, 80); })
+        .catch(() => showAlert('Upload failed'));
       addInput.value = '';
     };
     const card = main.querySelector('.card');
@@ -3212,6 +3411,7 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
         <div class="folder-photos-actions" style="margin-top:1rem;">
           <input type="file" accept="video/*" multiple id="folderVideosInput" hidden />
           <button type="button" class="btn btn-secondary" id="folderVideosAddBtn">Add videos</button>
+          <button type="button" class="btn btn-secondary" id="folderVideosDownloadZipBtn">Download all as ZIP</button>
           <button type="button" class="btn btn-ghost" id="folderVideosClearBtn" data-action="clear-folder-videos">Clear folder</button>
         </div>
       </section>
@@ -3219,7 +3419,35 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
     const grid = document.getElementById('folderVideosGrid');
     const addInput = document.getElementById('folderVideosInput');
     const addBtn = document.getElementById('folderVideosAddBtn');
+    const downloadZipBtn = document.getElementById('folderVideosDownloadZipBtn');
     const clearBtn = document.getElementById('folderVideosClearBtn');
+
+    if (downloadZipBtn) {
+      downloadZipBtn.onclick = () => {
+        const url = `${API}/api/projects/${pid}/campaigns/${cid}/folders/${fnum}/download-zip?postTypeId=${encodeURIComponent(ptId)}`;
+        downloadZipBtn.disabled = true;
+        downloadZipBtn.textContent = 'Preparing…';
+        withAuthQuery(url)
+          .then((authUrl) => fetch(authUrl))
+          .then((r) => {
+            if (!r.ok) throw new Error(r.status === 400 ? 'No videos in this folder.' : 'Download failed');
+            return r.blob();
+          })
+          .then((blob) => {
+            const u = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = u;
+            a.download = `folder${fnum}-videos.zip`;
+            a.click();
+            URL.revokeObjectURL(u);
+          })
+          .catch((err) => showAlert(err.message || 'Download failed'))
+          .finally(() => {
+            downloadZipBtn.disabled = false;
+            downloadZipBtn.textContent = 'Download all as ZIP';
+          });
+      };
+    }
 
     function revokeVideoObjectUrls() {
       if (!grid) return;
@@ -3229,7 +3457,7 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
       });
     }
     function refresh() {
-      apiCampaignFolders(pid, cid, ptId).then((data) => {
+      apiCampaignFolders(pid, cid, ptId, { cacheBust: true }).then((data) => {
         const videos = (data.folders || {})[`folder${fnum}`] || [];
         if (!grid) return;
         revokeVideoObjectUrls();
@@ -3242,7 +3470,7 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
           const overlayHtml = !isVideoText && postedAt
             ? `<div class="folder-video-posted-overlay" title="Posted; will be deleted in ${daysLeft} day(s)">
                 <span class="folder-video-posted-label">Video posted</span>
-                <span class="folder-video-posted-days">${daysLeft} day${daysLeft !== 1 ? 's' : ''} left</span>
+                <span class="folder-video-posted-days">${daysLeft} day${daysLeft !== 1 ? 's' : ''} left before deleted</span>
               </div>`
             : '';
           const badgeHtml = isVideoText
@@ -3282,7 +3510,9 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
       if (!files?.length) return;
       const pt = (campaign.postTypes || []).find((p) => p.id === ptId);
       const mediaType = (pt && pt.mediaType === 'video_text') ? 'video_text' : 'video';
-      apiCampaignUpload(pid, cid, fnum, files, ptId, mediaType).then(refresh).catch((err) => showAlert(err.message || 'Upload failed'));
+      campaignUploadWithProgress(pid, cid, fnum, files, ptId, mediaType)
+        .then(() => { setTimeout(refresh, 80); })
+        .catch((err) => showAlert(err.message || 'Upload failed'));
       addInput.value = '';
     };
     const cardVideos = main.querySelector('.card');
@@ -3323,7 +3553,7 @@ function renderCampaignFolderText(projectId, campaignId, folderNum, postTypeId) 
       <section class="card" id="folderTextOptionsCard">
         <p class="back-link-wrap"><a href="${contentPostTypeLink(pid, cid, ptId, '')}" class="nav-link">← Back to post type</a></p>
         <h1>Folder ${fnum} – on-screen text options</h1>
-        <p class="hint">One option is chosen at random per image from this folder.</p>
+        <p class="hint">One option is chosen at random per image from this folder. Long options show two lines; click ⋯ to expand.</p>
         <ul class="text-options-list" id="folderTextList"></ul>
         <div class="text-options-actions">
           <textarea id="folderNewText" class="folder-text-bubble-input" placeholder="New option… (Shift+Enter for new line)" rows="2" style="resize:none;min-height:44px;"></textarea>
@@ -3354,15 +3584,20 @@ function renderCampaignFolderText(projectId, campaignId, folderNum, postTypeId) 
       }
       list.innerHTML = arr.map((text, i) => {
         const count = textUsage[`${fnum}:${i}`] || 0;
+        const safeText = escapeHtml(text);
+        const lineCount = (text.match(/\n/g) || []).length + 1;
+        const isLong = lineCount > 2 || text.length > 120;
         return `
-        <li class="folder-text-option-pill">
-          <span class="folder-text-option-text">${escapeHtml(text)}</span>
+        <li class="folder-text-option-row${isLong ? ' folder-text-option-long' : ''}" data-index="${i}">
+          <span class="folder-text-option-index">${i + 1}</span>
+          <span class="folder-text-option-preview">${safeText}</span>
+          ${isLong ? '<button type="button" class="folder-text-option-expand" aria-label="Show full text">⋯</button>' : ''}
           ${count > 0 ? `<span class="folder-photo-usage-badge" title="Times used">${count}</span>` : ''}
           <button type="button" class="folder-text-option-remove" aria-label="Remove" data-index="${i}">×</button>
         </li>
       `;
       }).join('');
-      list.querySelectorAll('button').forEach((btn) => {
+      list.querySelectorAll('.folder-text-option-remove').forEach((btn) => {
         btn.onclick = () => {
           const idx = parseInt(btn.getAttribute('data-index'), 10);
           if (Number.isNaN(idx) || idx < 0) return;
@@ -3385,6 +3620,17 @@ function renderCampaignFolderText(projectId, campaignId, folderNum, postTypeId) 
               }
             })
             .catch((err) => { showAlert(err?.message || 'Failed to save. Try again.'); });
+        };
+      });
+      list.querySelectorAll('.folder-text-option-expand').forEach((btn) => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          const row = btn.closest('li');
+          if (!row) return;
+          row.classList.toggle('expanded');
+          const isExpanded = row.classList.contains('expanded');
+          btn.setAttribute('aria-label', isExpanded ? 'Show less' : 'Show full text');
+          btn.textContent = isExpanded ? '▲' : '⋯';
         };
       });
     }
@@ -3596,17 +3842,15 @@ function renderCampaignDetail(campaignId) {
             </div>
           </div>
         </div>
-        <div class="campaign-pages-ugc-sections">
-          <div class="campaign-ugc-section" id="campaignUgcSongSection">
-            <h3 class="settings-subtitle">UGC (song related)</h3>
-            <p class="hint">Pages that create content tied to the song or release.</p>
-            <div class="campaign-pages-grid" id="campaignPagesGridSong"></div>
+        <div class="campaign-pages-ugc-sections" id="campaignPagesUgcSections">
+          <div class="campaign-categories-toolbar">
+            <p class="hint">Add custom categories to organize pages. Pages are listed under each category in the order you add them.</p>
+            <div class="campaign-add-category-row">
+              <input type="text" id="campaignNewCategoryInput" class="field-input campaign-new-category-input" placeholder="Category name" aria-label="New category name" />
+              <button type="button" class="btn btn-secondary" id="campaignAddCategoryBtn">Add category</button>
+            </div>
           </div>
-          <div class="campaign-ugc-section" id="campaignUgcNotSection">
-            <h3 class="settings-subtitle">UGC (not related)</h3>
-            <p class="hint">Pages that create general or non-song UGC for this campaign.</p>
-            <div class="campaign-pages-grid" id="campaignPagesGridNot"></div>
-          </div>
+          <div id="campaignCategorySectionsContainer"></div>
         </div>
         <div class="campaign-detail-team-section" id="campaignTeamSection">
           <h3 class="settings-subtitle">Team members</h3>
@@ -3630,8 +3874,11 @@ function renderCampaignDetail(campaignId) {
       </section>
     `;
     const pageUgcTypes = campaign.pageUgcTypes && typeof campaign.pageUgcTypes === 'object' ? campaign.pageUgcTypes : {};
-    const songRelatedPages = pages.filter((p) => pageUgcTypes[p.id] !== 'not_related');
-    const notRelatedPages = pages.filter((p) => pageUgcTypes[p.id] === 'not_related');
+    const customCategories = (() => {
+      if (Array.isArray(campaign.customCategories) && campaign.customCategories.length) return [...campaign.customCategories];
+      const hasLegacy = pages.some((p) => pageUgcTypes[p.id] === 'song_related' || pageUgcTypes[p.id] === 'not_related');
+      return hasLegacy ? ['Song related', 'Not related'] : [];
+    })();
     function campaignPayload(overrides) {
       return {
         name: campaign.name,
@@ -3643,16 +3890,18 @@ function renderCampaignDetail(campaignId) {
         memberUsernames: campaign.memberUsernames || [],
         notes: campaign.notes ?? '',
         pageUgcTypes: campaign.pageUgcTypes || {},
+        customCategories: overrides.customCategories !== undefined ? overrides.customCategories : customCategories,
         ...overrides,
       };
     }
-    function renderPageCard(p) {
+    function renderPageCard(p, categoryOptions) {
       const pageDeployed = isPageDeployed(campaign, p.id);
       const deployedBadge = pageDeployed ? '<span class="badge badge-deployed">Deployed</span>' : '<span class="badge badge-draft">Draft</span>';
       const postTypeCount = ((campaign.pagePostTypes || {})[p.id] || campaign.postTypes || []).length;
       const postsForPage = deployedByPage[p.id] ?? 0;
       const avatarImg = p.hasAvatar ? `<img src="${projectAvatarUrl(p.id)}" alt="" class="project-avatar-img" />` : `<span class="project-circle-initial">${(p.name || 'P').charAt(0).toUpperCase()}</span>`;
-      const ugcType = pageUgcTypes[p.id] === 'not_related' ? 'not_related' : 'song_related';
+      const currentCategory = pageUgcTypes[p.id] && customCategories.includes(pageUgcTypes[p.id]) ? pageUgcTypes[p.id] : '';
+      const optionsHtml = '<option value="">Uncategorized</option>' + categoryOptions.map((cat) => `<option value="${escapeHtml(cat)}" ${currentCategory === cat ? 'selected' : ''}>${escapeHtml(cat)}</option>`).join('');
       return `
         <div class="campaign-page-card-wrap">
           <a href="#/campaign/${p.id}/${cid}" class="campaign-page-card">
@@ -3662,27 +3911,48 @@ function renderCampaignDetail(campaignId) {
             ${deployedBadge}
           </a>
           <label class="campaign-page-ugc-label">
-            <span class="campaign-page-ugc-label-text">UGC type</span>
-            <select class="campaign-page-ugc-select field-select" data-page-id="${p.id}" aria-label="UGC type">
-              <option value="song_related" ${ugcType === 'song_related' ? 'selected' : ''}>Song related</option>
-              <option value="not_related" ${ugcType === 'not_related' ? 'selected' : ''}>Not related</option>
+            <span class="campaign-page-ugc-label-text">Category</span>
+            <select class="campaign-page-category-select field-select" data-page-id="${p.id}" aria-label="Category">
+              ${optionsHtml}
             </select>
           </label>
           <button type="button" class="btn btn-ghost campaign-page-remove" data-page-id="${p.id}" data-page-name="${escapeHtml(p.name)}" aria-label="Remove from campaign">🗑</button>
         </div>
       `;
     }
-    const gridSong = document.getElementById('campaignPagesGridSong');
-    const gridNot = document.getElementById('campaignPagesGridNot');
-    if (gridSong) gridSong.innerHTML = songRelatedPages.length ? songRelatedPages.map(renderPageCard).join('') : '<p class="hint">No pages in this category. Use the UGC type dropdown on a page above to move it here.</p>';
-    if (gridNot) gridNot.innerHTML = notRelatedPages.length ? notRelatedPages.map(renderPageCard).join('') : '<p class="hint">No pages in this category. Use the UGC type dropdown on a page above to move it here.</p>';
-    [gridSong, gridNot].filter(Boolean).forEach((grid) => {
-      grid.querySelectorAll('.campaign-page-ugc-select').forEach((sel) => {
+    const container = document.getElementById('campaignCategorySectionsContainer');
+    if (container) {
+      const sections = [];
+      for (const catName of customCategories) {
+        const catPages = pages.filter((p) => pageUgcTypes[p.id] === catName);
+        sections.push(`
+          <div class="campaign-ugc-section" data-category="${escapeHtml(catName)}">
+            <div class="campaign-ugc-section-header">
+              <h3 class="settings-subtitle">${escapeHtml(catName)}</h3>
+              <button type="button" class="btn btn-ghost btn-sm campaign-remove-category" data-category="${escapeHtml(catName)}" aria-label="Remove category">🗑</button>
+            </div>
+            <div class="campaign-pages-grid campaign-category-grid">${catPages.length ? catPages.map((p) => renderPageCard(p, customCategories)).join('') : '<p class="hint">No pages in this category. Use the Category dropdown on a page to assign one.</p>'}</div>
+          </div>
+        `);
+      }
+      const uncategorizedPages = pages.filter((p) => !pageUgcTypes[p.id] || !customCategories.includes(pageUgcTypes[p.id]));
+      if (uncategorizedPages.length > 0) {
+        sections.push(`
+          <div class="campaign-ugc-section" data-category="__uncategorized__">
+            <h3 class="settings-subtitle">Uncategorized</h3>
+            <div class="campaign-pages-grid campaign-category-grid">${uncategorizedPages.map((p) => renderPageCard(p, customCategories)).join('')}</div>
+          </div>
+        `);
+      }
+      container.innerHTML = sections.join('');
+      container.querySelectorAll('.campaign-page-category-select').forEach((sel) => {
         sel.onchange = (e) => {
           e.stopPropagation();
           const pageId = parseInt(sel.dataset.pageId, 10);
-          const value = sel.value === 'song_related' ? 'song_related' : 'not_related';
-          const next = { ...(campaign.pageUgcTypes || {}), [pageId]: value };
+          const value = sel.value || '';
+          const next = { ...(campaign.pageUgcTypes || {}) };
+          if (value) next[pageId] = value;
+          else delete next[pageId];
           apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(campaignPayload({ pageUgcTypes: next })) })
             .then((r) => r.json())
             .then((c) => { campaign = c; renderCampaignDetail(cid); })
@@ -3690,7 +3960,7 @@ function renderCampaignDetail(campaignId) {
         };
         sel.onclick = (e) => e.stopPropagation();
       });
-      grid.querySelectorAll('.campaign-page-remove').forEach((btn) => {
+      container.querySelectorAll('.campaign-page-remove').forEach((btn) => {
         btn.onclick = (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -3704,7 +3974,41 @@ function renderCampaignDetail(campaignId) {
           });
         };
       });
-    });
+      container.querySelectorAll('.campaign-remove-category').forEach((btn) => {
+        btn.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const cat = btn.dataset.category;
+          showConfirm(`Remove category "${cat}"? Pages in it will become Uncategorized.`).then((ok) => {
+            if (!ok) return;
+            const nextCats = customCategories.filter((c) => c !== cat);
+            const nextUgc = { ...(campaign.pageUgcTypes || {}) };
+            for (const [pid, val] of Object.entries(nextUgc)) {
+              if (val === cat) delete nextUgc[pid];
+            }
+            apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(campaignPayload({ customCategories: nextCats, pageUgcTypes: nextUgc })) })
+              .then((r) => r.json())
+              .then((c) => { campaign = c; renderCampaignDetail(cid); })
+              .catch((err) => showAlert(err.message || 'Failed to update'));
+          });
+        };
+      });
+    }
+    const addCategoryBtn = document.getElementById('campaignAddCategoryBtn');
+    const newCategoryInput = document.getElementById('campaignNewCategoryInput');
+    if (addCategoryBtn && newCategoryInput) {
+      addCategoryBtn.onclick = () => {
+        const name = (newCategoryInput.value || '').trim();
+        if (!name) { showAlert('Enter a category name.'); return; }
+        if (customCategories.includes(name)) { showAlert('That category already exists.'); return; }
+        const nextCats = [...customCategories, name];
+        apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(campaignPayload({ customCategories: nextCats })) })
+          .then((r) => r.json())
+          .then((c) => { campaign = c; newCategoryInput.value = ''; renderCampaignDetail(cid); })
+          .catch((err) => showAlert(err.message || 'Failed to add category'));
+      };
+      newCategoryInput.onkeydown = (e) => { if (e.key === 'Enter') addCategoryBtn.click(); };
+    }
 
     const avatarImg = document.getElementById('campaignDetailAvatar');
     const avatarPlaceholder = document.getElementById('campaignDetailAvatarPlaceholder');
@@ -3820,12 +4124,31 @@ function renderCampaignDetail(campaignId) {
     const campaignNotesEl = document.getElementById('campaignNotes');
     const campaignNotesSaveBtn = document.getElementById('campaignNotesSave');
     if (campaignNotesSaveBtn && campaignNotesEl) {
-      campaignNotesSaveBtn.onclick = () => {
+      const NOTES_HEIGHT_KEY = 'campaign_notes_height_';
+      const savedNotesHeight = localStorage.getItem(NOTES_HEIGHT_KEY + cid);
+      if (savedNotesHeight) {
+        const px = parseInt(savedNotesHeight, 10);
+        if (!isNaN(px) && px > 0) campaignNotesEl.style.height = px + 'px';
+      }
+      const notesResizeObserver = new ResizeObserver(() => {
+        const h = campaignNotesEl.offsetHeight;
+        if (h > 0) localStorage.setItem(NOTES_HEIGHT_KEY + cid, String(h));
+      });
+      notesResizeObserver.observe(campaignNotesEl);
+
+      let notesSaveTimeout = null;
+      const NOTES_AUTOSAVE_MS = 800;
+      function saveNotes(showFeedback = false) {
         const notes = (campaignNotesEl.value || '').trim();
         apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, campaignStartDate: campaign.campaignStartDate, campaignEndDate: campaign.campaignEndDate, memberUsernames: campaign.memberUsernames || [], notes }) })
           .then((r) => { if (!r.ok) throw new Error('Save failed'); return r.json(); })
-          .then((c) => { campaign = c; showAlert('Notes saved.'); })
-          .catch((err) => showAlert(err.message || 'Failed to save notes'));
+          .then((c) => { campaign = c; if (showFeedback) showAlert('Notes saved.'); if (campaignNotesSaveBtn) { campaignNotesSaveBtn.textContent = 'Saved'; campaignNotesSaveBtn.disabled = true; setTimeout(() => { campaignNotesSaveBtn.textContent = 'Save notes'; campaignNotesSaveBtn.disabled = false; }, 2000); } })
+          .catch((err) => { showAlert(err.message || 'Failed to save notes'); if (campaignNotesSaveBtn) campaignNotesSaveBtn.textContent = 'Save notes'; campaignNotesSaveBtn.disabled = false; });
+      }
+      campaignNotesSaveBtn.onclick = () => { if (notesSaveTimeout) clearTimeout(notesSaveTimeout); notesSaveTimeout = null; saveNotes(true); };
+      campaignNotesEl.oninput = () => {
+        if (notesSaveTimeout) clearTimeout(notesSaveTimeout);
+        notesSaveTimeout = setTimeout(() => saveNotes(false), NOTES_AUTOSAVE_MS);
       };
     }
     document.getElementById('addPageToCampaignBtn').onclick = () => {
@@ -4367,7 +4690,7 @@ function renderTrendNew(campaignIdFromRoute) {
 
 function renderTrendDetail(trendId) {
   const tid = trendId;
-  Promise.all([apiProjects(), apiTrend(tid), apiTrendLatest(tid), apiAllCampaigns()]).then(([projects, trend, latest, campaigns]) => {
+  Promise.all([apiProjects(), apiTrend(tid), apiTrendLatest(tid), apiAllCampaigns(), apiConfig()]).then(([projects, trend, latest, campaigns, config]) => {
     if (!trend) {
       document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap back-link-wrap-centered"><a href="#/trends" class="nav-link">← Back to trends</a></p><p>Trend not found.</p></section>';
       return;
@@ -4472,7 +4795,7 @@ function renderTrendDetail(trendId) {
         if (!files || !files.length || !trendUploadTarget) return;
         const { pageIndex, folderNum, refreshPageFolders } = trendUploadTarget;
         trendUploadTarget = null;
-        apiTrendPageFolderUpload(tid, pageIndex, folderNum, Array.from(files))
+        trendUploadWithProgress(tid, pageIndex, folderNum, Array.from(files))
           .then(() => { if (typeof refreshPageFolders === 'function') refreshPageFolders(); showAlert('Photos added.'); })
           .catch((err) => showAlert(err.message || 'Upload failed'));
       };
@@ -4554,10 +4877,13 @@ function renderTrendDetail(trendId) {
     const grid = document.getElementById('trendPagesGrid');
     const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     const folderCount = Math.max(1, parseInt(trend.folderCount, 10) || 3);
+    const serverTz = (config && config.timezone) || 'America/New_York';
+    const userTz = getCalendarDisplayTimezone(serverTz);
     pages.forEach((p, idx) => {
       const pageIndex = idx + 1;
       const schedule = (trend.pageSchedules && trend.pageSchedules[p.id]) || {};
-      const times = schedule.scheduleTimes || ['10:00', '13:00', '16:00'];
+      const rawTimes = schedule.scheduleTimes || ['10:00', '13:00', '16:00'];
+      const times = rawTimes.map((t) => convertTimeForDisplay(serverTz, userTz, t || '10:00'));
       const daysOfWeek = schedule.scheduleDaysOfWeek ?? [0, 1, 2, 3, 4, 5, 6];
       const scheduleStart = schedule.scheduleStartDate || '';
       const scheduleEnd = schedule.scheduleEndDate || '';
@@ -4588,6 +4914,7 @@ function renderTrendDetail(trendId) {
         </div>
         <div class="trend-page-schedule schedule-content">
           <h4>Schedule</h4>
+          <p class="hint" style="margin-top:0;">Times use your selected timezone (Settings → Display timezone).</p>
           <label class="checkbox-field"><input type="checkbox" class="trend-schedule-enabled" data-page-id="${p.id}" ${schedule.scheduleEnabled !== false ? 'checked' : ''} /><span>Run on schedule</span></label>
           <div class="schedule-date-range" style="margin-top:8px;">
             <label class="field"><span>Start date</span><input type="date" class="trend-schedule-start" data-page-id="${p.id}" value="${scheduleStart}" /></label>
@@ -4663,7 +4990,7 @@ function renderTrendDetail(trendId) {
           e.preventDefault();
           dz.classList.remove('dragover');
           const files = e.dataTransfer.files;
-          if (files && files.length) apiTrendPageFolderUpload(tid, pageIndex, folderNum, Array.from(files)).then(() => refreshPageFolders()).catch((err) => showAlert(err.message || 'Upload failed'));
+          if (files && files.length) trendUploadWithProgress(tid, pageIndex, folderNum, Array.from(files)).then(() => refreshPageFolders()).catch((err) => showAlert(err.message || 'Upload failed'));
         };
         dz.onclick = (e) => {
           if (e.target === previewBtn || addBtn?.contains(e.target) || dz.querySelector('.trend-folder-photos')?.contains(e.target)) return;
@@ -4711,7 +5038,8 @@ function renderTrendDetail(trendId) {
         const scheduleStartVal = (card.querySelector('.trend-schedule-start') || {}).value || null;
         const scheduleEndVal = (card.querySelector('.trend-schedule-end') || {}).value || null;
         const daysChecked = Array.from(card.querySelectorAll('.trend-schedule-day:checked')).map((cb) => parseInt(cb.dataset.day, 10));
-        const scheduleTimes = Array.from(card.querySelectorAll('.trend-time-input')).map((inp) => inp.value || '10:00');
+        const displayTimes = Array.from(card.querySelectorAll('.trend-time-input')).map((inp) => inp.value || '10:00');
+        const scheduleTimes = displayTimes.map((t) => convertTimeToServer(userTz, serverTz, t));
         const newSchedules = { ...(trend.pageSchedules || {}) };
         newSchedules[p.id] = { scheduleEnabled: enabled, scheduleStartDate: scheduleStartVal, scheduleEndDate: scheduleEndVal, scheduleDaysOfWeek: daysChecked, scheduleTimes };
         apiUpdateTrend(tid, { pageSchedules: newSchedules }).then((t) => { trend = t; showAlert('Schedule saved.'); }).catch((err) => showAlert(err.message || 'Failed to save'));
@@ -4778,7 +5106,7 @@ function renderTrendDetail(trendId) {
 
 function renderCalendar() {
   setBreadcrumb({ view: 'calendar' });
-  apiWithAuth(`${API}/api/calendar`).then((r) => r.json()).then((data) => {
+  apiWithAuth(`${API}/api/calendar?_=${Date.now()}`).then((r) => r.json()).then((data) => {
     const allItems = data.items || [];
     const recurringTodo = Array.isArray(data.recurringTodo) ? data.recurringTodo : (data.todo || []).filter((t) => t.type === 'recurring').sort((a, b) => ((a.daysUntil ?? 999) - (b.daysUntil ?? 999)) || (a.stopDate || '').localeCompare(b.stopDate || ''));
     const campaignGapTodo = Array.isArray(data.campaignGapTodo) ? data.campaignGapTodo : (data.todo || []).filter((t) => t.type === 'campaign_gap').sort((a, b) => (a.daysBefore ?? 999) - (b.daysBefore ?? 999));
@@ -4807,6 +5135,12 @@ function renderCalendar() {
     let viewMode = 'list';
     let selectedDay = null;
     let calendarMonth = new Date();
+    const route = getRoute();
+    if (route.calendarDate) {
+      selectedDay = route.calendarDate;
+      const [y, m] = selectedDay.split('-');
+      calendarMonth = new Date(parseInt(y, 10), parseInt(m, 10) - 1, 1);
+    }
 
     function getFilteredItems() {
       if (scopeFilter === 'campaign') {
@@ -4939,7 +5273,7 @@ function renderCalendar() {
           <div class="calendar-day-detail">
             <p class="back-link-wrap"><button type="button" class="btn btn-ghost btn-sm" id="calendarDayBack">← Back to calendar</button></p>
             <h2>Posts on ${escapeHtml(dayLabel)}</h2>
-            <p class="hint">${dayItems.length} post${dayItems.length !== 1 ? 's' : ''} scheduled.</p>
+            <p class="hint">${dayItems.length} post${dayItems.length !== 1 ? 's' : ''} scheduled. <span class="calendar-legend calendar-legend-success">Green</span> = posted successfully, <span class="calendar-legend calendar-legend-failure">red</span> = failed to post.</p>
             <div class="calendar-header calendar-header-day">
               <span class="calendar-time">Time</span>
               <span class="calendar-project">Page</span>
@@ -4949,7 +5283,8 @@ function renderCalendar() {
               const inTz = it.scheduledAt ? formatScheduledAtInTz(it.scheduledAt, displayTz) : null;
               const timeDisplay = inTz ? inTz.timeLabel : formatTimeAMPM(it.time);
               const pageAvatar = it.projectId ? `<span class="calendar-page-avatar"><img src="${projectAvatarUrl(it.projectId)}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="calendar-page-avatar-placeholder" style="display:none;">${(it.projectName || 'P').charAt(0).toUpperCase()}</span></span>` : '';
-              return `<li class="calendar-item"><span class="calendar-time">${timeDisplay}</span><span class="calendar-project">${pageAvatar}<span class="calendar-page-name">${escapeHtml(it.projectName)}</span></span><span class="calendar-campaign"><a href="#/campaigns/${it.campaignId}" class="calendar-campaign-link">${escapeHtml(it.campaignName)}</a></span></li>`;
+              const statusClass = it.postStatus === 'success' ? ' calendar-item-success' : it.postStatus === 'failure' ? ' calendar-item-failure' : '';
+              return `<li class="calendar-item${statusClass}"><span class="calendar-time">${timeDisplay}</span><span class="calendar-project">${pageAvatar}<span class="calendar-page-name">${escapeHtml(it.projectName)}</span></span><span class="calendar-campaign"><a href="#/campaigns/${it.campaignId}" class="calendar-campaign-link">${escapeHtml(it.campaignName)}</a></span></li>`;
             }).join('')}</ul>
           </div>`;
       } else if (viewMode === 'calendar') {
@@ -5126,16 +5461,34 @@ function renderCalendar() {
           });
         });
       }
-      main.querySelector('#calendarViewList')?.addEventListener('click', () => { viewMode = 'list'; selectedDay = null; render(); });
-      main.querySelector('#calendarViewCalendar')?.addEventListener('click', () => { viewMode = 'calendar'; selectedDay = null; render(); });
+      main.querySelector('#calendarViewList')?.addEventListener('click', () => {
+        history.replaceState(null, '', '#/calendar');
+        viewMode = 'list';
+        selectedDay = null;
+        render();
+      });
+      main.querySelector('#calendarViewCalendar')?.addEventListener('click', () => {
+        history.replaceState(null, '', '#/calendar');
+        viewMode = 'calendar';
+        selectedDay = null;
+        render();
+      });
       main.querySelector('#calendarExportCsvBtn')?.addEventListener('click', doExportCsv);
       main.querySelector('#calendarMonthPrev')?.addEventListener('click', () => { calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1); render(); });
       main.querySelector('#calendarMonthNext')?.addEventListener('click', () => { calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1); render(); });
-      main.querySelector('#calendarDayBack')?.addEventListener('click', () => { selectedDay = null; render(); });
+      main.querySelector('#calendarDayBack')?.addEventListener('click', () => {
+        history.replaceState(null, '', '#/calendar');
+        selectedDay = null;
+        render();
+      });
       main.querySelectorAll('.calendar-cell-day[data-date-key]').forEach((btn) => {
         btn.addEventListener('click', () => {
           const key = btn.dataset.dateKey;
-          if (key && (itemsByDateKey[key] || []).length > 0) { selectedDay = key; render(); }
+          if (key && (itemsByDateKey[key] || []).length > 0) {
+            history.replaceState(null, '', `#/calendar/${key}`);
+            selectedDay = key;
+            render();
+          }
         });
       });
     }

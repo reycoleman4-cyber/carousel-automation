@@ -1,6 +1,7 @@
 const path = require('path');
 const os = require('os');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
+const archiver = require('archiver');
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs').promises;
@@ -25,6 +26,8 @@ const CAMPAIGNS_DIR = path.join(DATA, 'campaigns');
 const CONFIG_PATH = path.join(DATA, 'config.json');
 const LOGINS_PATH = path.join(DATA, 'logins.json');
 const RUNS_DIR = path.join(DATA, 'runs');
+const RUN_OUTCOMES_PATH = path.join(DATA, 'run-outcomes.json');
+const ENCODING_QUEUE_PATH = path.join(DATA, 'encoding-queue.json');
 const TEXT_USAGE_DIR = path.join(DATA, 'text-usage');
 const IMAGE_USAGE_DIR = path.join(DATA, 'image-usage');
 const VIDEO_USAGE_DIR = path.join(DATA, 'video-usage');
@@ -92,6 +95,107 @@ function ensureDataDir() {
   if (!fsSync.existsSync(VIDEO_POSTED_DIR)) fsSync.mkdirSync(VIDEO_POSTED_DIR, { recursive: true });
 }
 
+/** Run outcomes for calendar: success/failure per (projectId, campaignId, postTypeId, scheduledAt). Prune older than 14 days. */
+const RUN_OUTCOMES_RETENTION_DAYS = 14;
+async function readRunOutcomes() {
+  const raw = await fs.readFile(RUN_OUTCOMES_PATH, 'utf8').catch(() => '[]');
+  let list = [];
+  try {
+    list = JSON.parse(raw);
+  } catch (_) {}
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - RUN_OUTCOMES_RETENTION_DAYS);
+  const cutoffMs = cutoff.getTime();
+  const kept = list.filter((o) => new Date(o.scheduledAt).getTime() >= cutoffMs);
+  if (kept.length !== list.length) {
+    await fs.writeFile(RUN_OUTCOMES_PATH, JSON.stringify(kept), 'utf8').catch(() => {});
+  }
+  return kept;
+}
+
+async function appendRunOutcome(projectId, campaignId, postTypeId, scheduledAt, status, errorMessage = null) {
+  ensureDataDir();
+  const list = await readRunOutcomes();
+  list.push({
+    projectId: String(projectId),
+    campaignId: String(campaignId),
+    postTypeId: String(postTypeId),
+    scheduledAt,
+    status,
+    error: errorMessage || undefined,
+  });
+  await fs.writeFile(RUN_OUTCOMES_PATH, JSON.stringify(list), 'utf8').catch((e) => console.error('[run-outcomes] write failed', e.message));
+}
+
+/** Returns a map keyed by `${projectId}|${campaignId}|${postTypeId}|${scheduledAt}` -> { status } */
+function runOutcomesByKey(outcomes) {
+  const map = {};
+  for (const o of outcomes) {
+    map[`${o.projectId}|${o.campaignId}|${o.postTypeId}|${o.scheduledAt}`] = o;
+  }
+  return map;
+}
+
+// --- Encoding job queue (for VPS worker when ENCODING_MODE=worker) ---
+async function readEncodingQueue() {
+  ensureDataDir();
+  const raw = await fs.readFile(ENCODING_QUEUE_PATH, 'utf8').catch(() => '{}');
+  try {
+    const data = JSON.parse(raw);
+    return {
+      nextId: data.nextId || 1,
+      jobs: data.jobs || {},
+      pendingIds: Array.isArray(data.pendingIds) ? data.pendingIds : [],
+    };
+  } catch (_) {
+    return { nextId: 1, jobs: {}, pendingIds: [] };
+  }
+}
+
+async function writeEncodingQueue(data) {
+  ensureDataDir();
+  await fs.writeFile(ENCODING_QUEUE_PATH, JSON.stringify(data, null, 0), 'utf8');
+}
+
+async function enqueueEncodingJob(payload) {
+  const q = await readEncodingQueue();
+  const id = String(q.nextId);
+  q.nextId = q.nextId + 1;
+  q.jobs[id] = {
+    id,
+    status: 'pending',
+    payload,
+    result: null,
+    createdAt: new Date().toISOString(),
+  };
+  q.pendingIds.push(id);
+  await writeEncodingQueue(q);
+  return id;
+}
+
+async function claimNextEncodingJob() {
+  const q = await readEncodingQueue();
+  const id = q.pendingIds.shift();
+  if (!id || !q.jobs[id]) return null;
+  q.jobs[id].status = 'claimed';
+  q.jobs[id].claimedAt = new Date().toISOString();
+  await writeEncodingQueue(q);
+  return q.jobs[id];
+}
+
+async function completeEncodingJob(id, result) {
+  const q = await readEncodingQueue();
+  if (!q.jobs[id]) return;
+  q.jobs[id].status = result && result.error ? 'failed' : 'completed';
+  q.jobs[id].result = result || null;
+  q.jobs[id].completedAt = new Date().toISOString();
+  await writeEncodingQueue(q);
+}
+
+function getEncodingJob(id) {
+  return readEncodingQueue().then((q) => q.jobs[id] || null);
+}
+
 /** Returns req.user.id or sends 401 and null. Use for routes that must be per-user. */
 function requireUserId(req, res) {
   if (!req.user || !req.user.id) {
@@ -99,6 +203,16 @@ function requireUserId(req, res) {
     return null;
   }
   return req.user.id;
+}
+
+/** Encoding worker auth: Bearer ENCODING_WORKER_SECRET or query.secret. Used for /api/encoding/jobs/next and .../complete. */
+function requireEncodingWorker(req, res, next) {
+  const secret = req.headers.authorization?.replace(/^Bearer\s+/i, '') || req.query.secret;
+  const expected = process.env.ENCODING_WORKER_SECRET;
+  if (!expected || secret !== expected) {
+    return res.status(401).json({ error: 'Invalid encoding worker secret' });
+  }
+  next();
 }
 
 function getProjectsPath(userId) {
@@ -388,6 +502,18 @@ function getPresetFilePath(userId, presetId) {
   if (!preset || !preset.filename) return null;
   const dir = getPresetDir(userId);
   return dir ? path.join(dir, preset.filename) : null;
+}
+
+/** Resolve preset path: if presetId is 'random', pick a random preset from the user's list; otherwise get that preset's path. */
+function resolvePresetPath(userId, presetId) {
+  if (!presetId) return null;
+  if (String(presetId) === 'random') {
+    const presets = getTextPresets(userId).filter((p) => p && p.id != null && p.filename);
+    if (!presets.length) return null;
+    const chosen = presets[Math.floor(Math.random() * presets.length)];
+    return getPresetFilePath(userId, chosen.id);
+  }
+  return getPresetFilePath(userId, presetId);
 }
 
 function saveTextPreset(userId, preset) {
@@ -868,6 +994,101 @@ async function addTextOverlay(imagePath, text, outputPath, textStyle = {}) {
   return outBuf;
 }
 
+/** Build encoding job payload for VPS worker. Does selection + usage/posted updates; returns payload or null if run locally (photo, preset, or no Supabase). */
+async function buildEncodingJobPayload(userId, projectId, campaignId, postTypeId, options = {}) {
+  if (!storage.useSupabase()) return null;
+  const campaign = getCampaignById(campaignId, userId);
+  if (!campaign) return null;
+  const pt = getPostType(campaign, postTypeId || 'default', projectId);
+  if (!pt) return null;
+  const projectIdStr = String(projectId);
+  const campaignIdStr = String(campaignId);
+  const runId = Date.now();
+  const outputFilename = `video-${runId}.mp4`;
+
+  if (pt.mediaType === 'video') {
+    const folderCount = 2;
+    await ensureDirs(userId, projectIdStr, campaignIdStr, folderCount, pt.id);
+    const folders = campaignDirs(userId, projectIdStr, campaignIdStr, folderCount, pt.id);
+    const priorityVideos = await listVideos(folders[0]);
+    const fallbackVideos = await listVideos(folders[1]);
+    const posted1 = await readVideoPosted(userId, projectIdStr, campaignIdStr, pt.id, 1);
+    const posted2 = await readVideoPosted(userId, projectIdStr, campaignIdStr, pt.id, 2);
+    const unposted = (list, posted) => list.filter((v) => {
+      const name = v.filename || (v.path && path.basename(v.path));
+      return name && !posted[name];
+    });
+    const unpostedPriority = unposted(priorityVideos, posted1);
+    const unpostedFallback = unposted(fallbackVideos, posted2);
+    let chosen = null;
+    let folderNum = 0;
+    if (unpostedPriority.length) {
+      chosen = unpostedPriority[Math.floor(Math.random() * unpostedPriority.length)];
+      folderNum = 1;
+    } else if (unpostedFallback.length) {
+      chosen = unpostedFallback[Math.floor(Math.random() * unpostedFallback.length)];
+      folderNum = 2;
+    }
+    if (!chosen) throw new Error('No unposted videos in Priority or Fallback folders. Add new videos or wait for posted ones to be removed after 7 days.');
+    const filename = chosen.filename || path.basename(chosen.path || chosen);
+    await markVideoPosted(userId, projectIdStr, campaignIdStr, pt.id, folderNum, filename);
+    const presetPath = pt.textPresetId ? resolvePresetPath(userId, pt.textPresetId) : null;
+    if (presetPath && fsSync.existsSync(presetPath)) return null;
+    const sourceUrl = storage.getFileUrl(projectIdStr, campaignIdStr, pt.id, folderNum, filename, userId);
+    if (!sourceUrl) return null;
+    return {
+      type: 'video',
+      sourceUrl,
+      outputFilename,
+      projectId: projectIdStr,
+      campaignId: campaignIdStr,
+      userId,
+      runId,
+      postTypeId: postTypeId || 'default',
+      sendToBlotato: !!options.sendToBlotato,
+      draft: !!options.draft,
+      scheduledAt: options.scheduledAt || null,
+    };
+  }
+
+  if (pt.mediaType === 'video_text') {
+    const folderCount = 1;
+    await ensureDirs(userId, projectIdStr, campaignIdStr, folderCount, pt.id);
+    const folders = campaignDirs(userId, projectIdStr, campaignIdStr, folderCount, pt.id);
+    const videos = await listVideos(folders[0]);
+    const usage = await readVideoUsage(userId, projectIdStr, campaignIdStr, pt.id, 1);
+    const chosen = pickLeastUsedVideo(videos, () => usage);
+    if (!chosen) throw new Error('No videos in folder. Upload videos first.');
+    const filename = chosen.filename || path.basename(chosen.path || chosen);
+    await incrementVideoUsage(userId, projectIdStr, campaignIdStr, pt.id, 1, filename);
+    const presetPath = pt.textPresetId ? resolvePresetPath(userId, pt.textPresetId) : null;
+    if (presetPath && fsSync.existsSync(presetPath)) return null;
+    const fromOverride = Array.isArray(options.textOptionsOverride) && options.textOptionsOverride.length && Array.isArray(options.textOptionsOverride[0]) ? options.textOptionsOverride[0] : null;
+    const textOptions = fromOverride ?? (Array.isArray(pt.textOptionsPerFolder) && pt.textOptionsPerFolder.length > 0 ? pt.textOptionsPerFolder[0] : null) ?? (Array.isArray(campaign.textOptionsPerFolder) && campaign.textOptionsPerFolder.length > 0 ? campaign.textOptionsPerFolder[0] : null) ?? DEFAULT_TEXT_OPTIONS;
+    const text = await pickLeastUsedTextOptionAndIncrement(projectIdStr, campaignIdStr, postTypeId || 'default', 0, textOptions);
+    const textStyle = options.textStyleOverride && options.textStyleOverride[0] ? options.textStyleOverride[0] : (pt.textStylePerFolder && pt.textStylePerFolder[0]) || {};
+    const sourceUrl = storage.getFileUrl(projectIdStr, campaignIdStr, pt.id, 1, filename, userId);
+    if (!sourceUrl) return null;
+    return {
+      type: 'video_text',
+      sourceUrl,
+      text: text != null ? String(text).trim() : '',
+      textStyle,
+      outputFilename,
+      projectId: projectIdStr,
+      campaignId: campaignIdStr,
+      userId,
+      runId,
+      postTypeId: postTypeId || 'default',
+      sendToBlotato: !!options.sendToBlotato,
+      draft: !!options.draft,
+      scheduledAt: options.scheduledAt || null,
+    };
+  }
+
+  return null;
+}
+
 async function runCampaignPipelineVideo(userId, projectId, campaignId, postTypeId) {
   const campaign = getCampaignById(campaignId, userId);
   if (!campaign) throw new Error('Campaign not found');
@@ -901,7 +1122,7 @@ async function runCampaignPipelineVideo(userId, projectId, campaignId, postTypeI
   if (!chosen) throw new Error('No unposted videos in Priority or Fallback folders. Add new videos or wait for posted ones to be removed after 7 days.');
   const filename = chosen.filename || path.basename(chosen.path || chosen);
   await markVideoPosted(userId, projectIdStr, campaignIdStr, pt.id, folderNum, filename);
-  const presetPath = pt.textPresetId ? getPresetFilePath(userId, pt.textPresetId) : null;
+  const presetPath = pt.textPresetId ? resolvePresetPath(userId, pt.textPresetId) : null;
   const runId = Date.now();
   if (presetPath && fsSync.existsSync(presetPath)) {
     let basePath;
@@ -937,10 +1158,23 @@ async function runCampaignPipelineVideo(userId, projectId, campaignId, postTypeI
       throw err;
     }
   }
-  const videoUrl = storage.useSupabase()
-    ? storage.getFileUrl(projectIdStr, campaignIdStr, pt.id, folderNum, filename, userId)
-    : `${baseUrl}/api/projects/${projectIdStr}/campaigns/${campaignIdStr}/folders/${folderNum}/media/${encodeURIComponent(filename)}?postTypeId=${encodeURIComponent(pt.id)}`;
-  if (!videoUrl) throw new Error('Could not get video URL');
+  const uidSeg = String(userId).replace(/[/\\]/g, '_');
+  const outName = `video-${runId}.mp4`;
+  let videoBuffer;
+  if (storage.useSupabase()) {
+    videoBuffer = await storage.readFileBuffer(projectIdStr, campaignIdStr, pt.id, folderNum, filename, userId);
+  } else {
+    const folderPath = folders[folderNum - 1];
+    videoBuffer = await fs.readFile(path.join(folderPath, filename));
+  }
+  if (storage.useSupabase()) {
+    await storage.uploadGenerated(projectIdStr, campaignIdStr, outName, videoBuffer, 'video/mp4', userId);
+  } else {
+    const outDir = generatedDir(userId, projectIdStr, campaignIdStr);
+    await fs.mkdir(outDir, { recursive: true }).catch(() => {});
+    await fs.writeFile(path.join(outDir, outName), videoBuffer);
+  }
+  const videoUrl = `${baseUrl}/generated/${uidSeg}/${projectIdStr}/${campaignIdStr}/${outName}`;
   const runData = {
     campaignId: campaignIdStr,
     runId,
@@ -1018,7 +1252,8 @@ async function compressVideoBufferToMax(buffer, maxBytes, originalExt) {
     await new Promise((resolve, reject) => {
       ffmpeg(tmpIn)
         .outputOptions([
-          '-c:v', 'libx264', '-crf', '28', '-preset', 'medium',
+          '-c:v', 'libx264', '-crf', '28', '-preset', 'superfast',
+          '-threads', '1',
           '-fs', String(targetFs),
           '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart',
         ])
@@ -1038,9 +1273,12 @@ async function compressVideoBufferToMax(buffer, maxBytes, originalExt) {
   }
 }
 
+/** Low-memory ffmpeg options to avoid OOM (SIGKILL) on Railway/constrained hosts. */
+const FFMPEG_LOW_MEM_OPTS = ['-threads', '1', '-preset', 'superfast'];
+
 /** Overlay text on video using ffmpeg; writes to outputPath (mp4). Used for both preview and final run output—
  *  so stroke, 1080x1920 crop, and text positioning apply to the final link. Uses textfile= to avoid quoting issues.
- *  options.preview: if true, limit output to a short clip and use fewer threads to avoid OOM (SIGKILL) on constrained hosts. */
+ *  options.preview: if true, limit output to a short clip. Always uses low-memory opts to avoid SIGKILL. */
 async function addVideoTextOverlay(inputPath, text, textStyle, outputPath, options = {}) {
   const isPreview = options.preview === true;
   const W = 1080;
@@ -1048,7 +1286,7 @@ async function addVideoTextOverlay(inputPath, text, textStyle, outputPath, optio
   const cropFilter = `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H}:(iw-${W})/2:(ih-${H})/2`;
   const hasText = text != null && typeof text === 'string' && String(text).trim().length > 0;
   if (!hasText) {
-    const outputOpts = [`-vf`, cropFilter, '-c:a', 'copy', '-threads', isPreview ? '1' : '2'];
+    const outputOpts = ['-vf', cropFilter, '-c:a', 'copy', ...FFMPEG_LOW_MEM_OPTS];
     if (isPreview) outputOpts.push('-t', '5');
     await new Promise((resolve, reject) => {
       ffmpeg(inputPath)
@@ -1115,7 +1353,7 @@ async function addVideoTextOverlay(inputPath, text, textStyle, outputPath, optio
       return `drawtext=textfile='${escapeDrawtextPath(textfilePath)}':${baseOpts}:x='${xExpr}':y='${yExpr}'`;
     });
     const vf = [cropFilter, ...drawtextFilters].join(',');
-    const outputOpts = [`-vf`, vf, '-c:a', 'copy', '-threads', isPreview ? '1' : '2'];
+    const outputOpts = ['-vf', vf, '-c:a', 'copy', ...FFMPEG_LOW_MEM_OPTS];
     if (isPreview) outputOpts.push('-t', '5');
 
     await new Promise((resolve, reject) => {
@@ -1159,7 +1397,7 @@ async function overlayPresetOnVideo(basePath, presetPath, outputPath, options = 
       '-map', '0:a?',
       '-c:v', 'libx264',
       '-c:a', 'copy',
-      '-threads', isPreview ? '1' : '2',
+      ...FFMPEG_LOW_MEM_OPTS,
     ])
     .output(outputPath);
   if (isPreview) proc.outputOptions(['-t', '5']);
@@ -1186,7 +1424,7 @@ async function runCampaignPipelineVideoWithText(userId, projectId, campaignId, t
   if (!chosen) throw new Error('No videos in folder. Upload videos first.');
   const filename = chosen.filename || path.basename(chosen.path || chosen);
   await incrementVideoUsage(userId, projectIdStr, campaignIdStr, pt.id, 1, filename);
-  const presetPath = pt.textPresetId ? getPresetFilePath(userId, pt.textPresetId) : null;
+  const presetPath = pt.textPresetId ? resolvePresetPath(userId, pt.textPresetId) : null;
   const usePresetOnly = presetPath && fsSync.existsSync(presetPath);
   let inputPath;
   try {
@@ -2325,8 +2563,12 @@ api.put('/campaigns/:campaignId', (req, res) => {
       pageUgcTypes = {};
       for (const [k, v] of Object.entries(req.body.pageUgcTypes)) {
         const pid = parseInt(k, 10);
-        if (!isNaN(pid) && (v === 'song_related' || v === 'not_related')) pageUgcTypes[pid] = v;
+        if (!isNaN(pid) && typeof v === 'string' && v.trim()) pageUgcTypes[pid] = v.trim();
       }
+    }
+    let customCategories = Array.isArray(campaign.customCategories) ? [...campaign.customCategories] : [];
+    if (Array.isArray(req.body.customCategories)) {
+      customCategories = req.body.customCategories.map((c) => String(c).trim()).filter(Boolean);
     }
     const previousPageIds = campaign.pageIds && campaign.pageIds.length ? campaign.pageIds : (campaign.projectId != null ? [campaign.projectId] : []);
     const newlyAddedPageIds = validPageIds.filter((pid) => !previousPageIds.includes(pid));
@@ -2338,7 +2580,7 @@ api.put('/campaigns/:campaignId', (req, res) => {
         pagePostTypes[pid] = [];
       }
     });
-    const updated = { ...campaign, name, pageIds: validPageIds, releaseDate, releaseType, campaignStartDate, campaignEndDate, memberUsernames: memberUsernames || [], notes, pagePostTypes, pageUgcTypes };
+    const updated = { ...campaign, name, pageIds: validPageIds, releaseDate, releaseType, campaignStartDate, campaignEndDate, memberUsernames: memberUsernames || [], notes, pagePostTypes, pageUgcTypes, customCategories };
     if (campaign.projectId != null && !campaign.pageIds) delete updated.projectId;
     saveCampaign(updated, uid);
     res.json(updated);
@@ -2637,7 +2879,10 @@ api.get('/projects/:projectId/campaigns/:campaignId/folders/:folderNum/images/:f
   try {
     if (storage.useSupabase()) {
       const directUrl = storage.getFileUrl(projectId, campaignId, postTypeId, folderNum, filename, uid);
-      if (directUrl) return res.redirect(302, directUrl);
+      if (directUrl) {
+        res.set('Cache-Control', 'public, max-age=86400');
+        return res.redirect(302, directUrl);
+      }
       const buffer = await storage.readFileBuffer(projectId, campaignId, postTypeId, folderNum, filename, uid);
       res.set('Cache-Control', 'private, max-age=3600');
       res.type(imageContentType(filename));
@@ -2654,7 +2899,10 @@ api.get('/projects/:projectId/campaigns/:campaignId/folders/:folderNum/images/:f
   } catch (e) {
     if (e.message && (e.message.includes('Download failed') || /maximum allowed size|exceeded/i.test(e.message))) {
       const directUrl = storage.useSupabase() && storage.getFileUrl(projectId, campaignId, postTypeId, folderNum, filename, uid);
-      if (directUrl) return res.redirect(302, directUrl);
+      if (directUrl) {
+        res.set('Cache-Control', 'public, max-age=86400');
+        return res.redirect(302, directUrl);
+      }
       return res.status(404).end();
     }
     res.status(500).end();
@@ -2674,6 +2922,11 @@ api.get('/projects/:projectId/campaigns/:campaignId/folders/:folderNum/media/:fi
   const pt = getPostType(campaign, postTypeId, projectId);
   if (!campaign || !pt) return res.status(404).end();
   if (storage.useSupabase()) {
+    const directUrl = storage.getFileUrl(projectId, campaignId, postTypeId, folderNum, filename, uid);
+    if (directUrl) {
+      res.set('Cache-Control', 'public, max-age=86400');
+      return res.redirect(302, directUrl);
+    }
     try {
       const buffer = await storage.readFileBuffer(projectId, campaignId, postTypeId, folderNum, filename, uid);
       res.set('Cache-Control', 'private, max-age=3600');
@@ -2692,6 +2945,49 @@ api.get('/projects/:projectId/campaigns/:campaignId/folders/:folderNum/media/:fi
   if (!path.resolve(filePath).startsWith(path.resolve(UPLOADS))) return res.status(403).end();
   res.set('Cache-Control', 'public, max-age=86400');
   res.sendFile(path.resolve(filePath), (err) => { if (err && err.statusCode) res.status(err.statusCode).end(); });
+});
+
+api.get('/projects/:projectId/campaigns/:campaignId/folders/:folderNum/download-zip', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  const projectId = String(req.params.projectId);
+  const campaignId = String(req.params.campaignId);
+  const folderNum = Math.max(1, parseInt(req.params.folderNum, 10));
+  const postTypeId = req.query.postTypeId || 'default';
+  const campaign = getCampaignById(campaignId, uid);
+  const pt = getPostType(campaign, postTypeId, projectId);
+  if (!campaign || !pt) return res.status(404).json({ error: 'Campaign or post type not found' });
+  const isVideo = pt.mediaType === 'video' || pt.mediaType === 'video_text';
+  if (!isVideo) return res.status(400).json({ error: 'Download zip is only available for video folders' });
+  const folderCount = pt.mediaType === 'video_text' ? 1 : 2;
+  if (folderNum < 1 || folderNum > folderCount) return res.status(400).json({ error: 'Invalid folder' });
+  try {
+    const dirs = campaignDirs(uid, projectId, campaignId, folderCount, pt.id);
+    const dir = dirs[folderNum - 1];
+    if (!dir) return res.status(404).json({ error: 'Folder not found' });
+    const files = await listVideos(dir);
+    if (!files.length) return res.status(400).json({ error: 'No videos in this folder' });
+    const zipName = `folder${folderNum}-videos.zip`;
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
+    const archive = archiver('zip', { zlib: { level: 5 } });
+    archive.on('error', (err) => { if (!res.headersSent) res.status(500).json({ error: err.message }); });
+    archive.pipe(res);
+    for (const file of files) {
+      const name = file.filename || (file.path && path.basename(file.path));
+      if (!name) continue;
+      let buf;
+      if (storage.useSupabase()) {
+        buf = await storage.readFileBuffer(projectId, campaignId, pt.id, folderNum, name, uid);
+      } else {
+        buf = await fs.readFile(file.path);
+      }
+      archive.append(buf, { name });
+    }
+    await archive.finalize();
+  } catch (e) {
+    if (!res.headersSent) res.status(500).json({ error: String(e.message) });
+  }
 });
 
 api.get('/calendar', async (req, res) => {
@@ -2764,7 +3060,7 @@ api.get('/calendar', async (req, res) => {
             countByKey[key] = { added: 0, max: await getMinFolderCount(c.projectId, c.id, pt) };
           }
           const { added, max } = countByKey[key];
-          const capped = pt.mediaType === 'photo' || pt.mediaType === 'video_text';
+          const capped = pt.mediaType === 'photo' || pt.mediaType === 'video_text' || pt.mediaType === 'video';
           if (capped && added >= max) continue;
           for (const t of times) {
             if (capped && countByKey[key].added >= countByKey[key].max) break;
@@ -2780,6 +3076,7 @@ api.get('/calendar', async (req, res) => {
               projectId: c.projectId,
               campaignName: c.name,
               campaignId: c.id,
+              postTypeId: pt.id,
             });
             if (capped) countByKey[key].added++;
           }
@@ -2829,6 +3126,14 @@ api.get('/calendar', async (req, res) => {
     }
     campaignGapTodo.sort((a, b) => a.daysBefore - b.daysBefore);
 
+    const outcomes = await readRunOutcomes();
+    const outcomeByKey = runOutcomesByKey(outcomes);
+    for (const it of items) {
+      const key = `${it.projectId}|${it.campaignId}|${it.postTypeId || 'default'}|${it.scheduledAt}`;
+      const o = outcomeByKey[key];
+      it.postStatus = o ? o.status : null;
+    }
+
     res.json({ items, timezone: TZ, timezoneLabel: getScheduleTimezoneLabel(), todo: [...recurringTodo, ...campaignGapTodo], recurringTodo, campaignGapTodo });
   } catch (e) {
     res.status(500).json({ error: String(e.message) });
@@ -2865,11 +3170,15 @@ function validateUploadContext(req, res, next) {
   next();
 }
 
+const UPLOAD_MAX_VIDEO_MB = 100;
 api.post('/projects/:projectId/campaigns/:campaignId/upload', validateUploadContext, (req, res, next) => {
   upload.array('photo', 100)(req, res, async (err) => {
     if (err) {
       console.error('[upload] multer error:', err.message);
-      return res.status(400).json({ error: err.message || 'Upload failed' });
+      const msg = err.code === 'LIMIT_FILE_SIZE'
+        ? `File too large. Each file must be under ${UPLOAD_MAX_VIDEO_MB} MB to upload. Videos are then compressed to under 50 MB for storage. Use a shorter clip or compress the video first.`
+        : (err.message || 'Upload failed');
+      return res.status(400).json({ error: msg });
     }
     const ctx = req.uploadContext;
     const files = req.files || [];
@@ -3006,24 +3315,134 @@ api.post('/projects/:projectId/campaigns/:campaignId/run', async (req, res) => {
     const textOptionsOverride = Array.isArray(req.body?.textOptionsPerFolder) ? req.body.textOptionsPerFolder : null;
     const sendAsDraft = req.body?.sendAsDraft === true;
     const addMusicRequested = req.body?.addMusicToCarousel === true;
-    const result = await runCampaignPipeline(uid, projectId, campaignId, textStyleOverride, textOptionsOverride, postTypeId);
     const config = getConfig();
     const project = getProjects(uid).find((p) => String(p.id) === String(projectId));
     const accountId = project?.blotatoAccountId;
     const apiKey = config?.blotatoApiKey;
     const isPhotoPostType = pt && pt.mediaType === 'photo';
     const addMusicToCarousel = isPhotoPostType && addMusicRequested;
+
+    if (process.env.ENCODING_MODE === 'worker' && pt && (pt.mediaType === 'video' || pt.mediaType === 'video_text')) {
+      try {
+        const payload = await buildEncodingJobPayload(uid, projectId, campaignId, postTypeId, {
+          sendToBlotato: !!(apiKey && accountId),
+          draft: sendAsDraft,
+          scheduledAt: null,
+          textStyleOverride,
+          textOptionsOverride,
+        });
+        if (payload) {
+          const jobId = await enqueueEncodingJob(payload);
+          return res.json({ jobId, status: 'queued' });
+        }
+      } catch (e) {
+        return res.status(500).json({ error: String(e && e.message || 'Run failed') });
+      }
+    }
+
+    const result = await runCampaignPipeline(uid, projectId, campaignId, textStyleOverride, textOptionsOverride, postTypeId);
+    let runStatus = null;
     if (apiKey && accountId && result.webContentUrls?.length) {
       try {
         await sendToBlotato(apiKey, accountId, result.webContentUrls, { isDraft: sendAsDraft, addMusicToCarousel });
         result.blotatoSent = true;
         result.blotatoSentAsDraft = sendAsDraft;
+        runStatus = 'success';
       } catch (blotatoErr) {
         result.blotatoError = String(blotatoErr.message);
+        runStatus = 'failure';
       }
+    }
+    if (runStatus) {
+      const todayStrRun = getTodayDateStringInTZ();
+      const currentTimeRun = getCurrentTimeString();
+      const times = (pt && (pt.scheduleTimes || campaign.scheduleTimes)) || [];
+      const slotTime = times.filter((t) => String(t) <= currentTimeRun).pop() || times[0] || currentTimeRun;
+      const scheduledAtRun = getScheduleUtcIso(todayStrRun, slotTime, TZ);
+      await appendRunOutcome(projectId, campaignId, postTypeId, scheduledAtRun, runStatus, runStatus === 'failure' ? result.blotatoError : null).catch(() => {});
     }
     // Photos stay in folders; we track usage via image-usage counts and pick least-used next time.
     res.json(result);
+  } catch (e) {
+    let msg = String(e && e.message || 'Run failed');
+    if (/SIGKILL|killed|signal|ECONNRESET|out of memory/i.test(msg)) {
+      msg = 'Video encoding was stopped (server ran out of memory or hit a limit). Try a shorter or smaller video, or try again—encoding now uses lower memory.';
+    }
+    res.status(500).json({ error: msg });
+  }
+});
+
+// --- Encoding queue API (for VPS worker when ENCODING_MODE=worker) ---
+api.get('/encoding/jobs/next', requireEncodingWorker, async (req, res) => {
+  try {
+    const job = await claimNextEncodingJob();
+    if (!job) return res.status(204).send();
+    res.json(job);
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.post('/encoding/jobs/:id/complete', requireEncodingWorker, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { url, error: errMsg } = req.body || {};
+    await completeEncodingJob(id, url ? { url, error: null } : { url: null, error: String(errMsg || 'Unknown error') });
+    const job = await getEncodingJob(id);
+    if (!job || !job.payload) return res.json({ ok: true });
+    const payload = job.payload;
+    const { userId, projectId, campaignId, postTypeId, sendToBlotato, draft, scheduledAt } = payload;
+    if (job.status === 'completed' && url && payload.runId != null) {
+      const campaignIdStr = String(campaignId);
+      const runData = {
+        campaignId: campaignIdStr,
+        runId: payload.runId,
+        webContentUrls: [url],
+        webContentBase64: [],
+        usedSourcePaths: [],
+        at: new Date().toISOString(),
+      };
+      await fs.writeFile(
+        path.join(RUNS_DIR, `${campaignIdStr}.json`),
+        JSON.stringify({ campaignId: campaignIdStr, runId: runData.runId, webContentUrls: runData.webContentUrls, at: runData.at }, null, 2)
+      );
+      if (sendToBlotato && userId && projectId) {
+        const config = getConfig();
+        const project = getProjects(userId).find((p) => String(p.id) === String(projectId));
+        const accountId = project?.blotatoAccountId;
+        const apiKey = config?.blotatoApiKey;
+        if (apiKey && accountId) {
+          try {
+            await sendToBlotato(apiKey, accountId, [url], { isDraft: draft, addMusicToCarousel: false });
+            console.log(`[encoding] Blotato post sent for campaign ${campaignId} page ${projectId}`);
+          } catch (blotatoErr) {
+            console.error(`[encoding] Blotato failed:`, blotatoErr.message);
+          }
+        }
+      }
+      if (scheduledAt) {
+        await appendRunOutcome(projectId, campaignId, postTypeId, scheduledAt, 'success').catch(() => {});
+      }
+    } else if (job.status === 'failed' && scheduledAt) {
+      const errMsg = job.result && job.result.error;
+      await appendRunOutcome(projectId, campaignId, postTypeId, scheduledAt, 'failure', errMsg || null).catch(() => {});
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.get('/encoding/jobs/:id', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const job = await getEncodingJob(req.params.id);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (job.payload && String(job.payload.userId) !== String(uid)) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    res.json(job);
   } catch (e) {
     res.status(500).json({ error: String(e.message) });
   }
@@ -3658,6 +4077,19 @@ api.post('/logins/:id/avatar', (req, res, next) => {
   });
 });
 
+/** Parse Range header (e.g. "bytes=0-1023") and return [start, end] or null. */
+function parseRange(rangeHeader, totalLength) {
+  if (!rangeHeader || totalLength === 0) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+  if (!m) return null;
+  let start = m[1] === '' ? 0 : parseInt(m[1], 10);
+  let end = m[2] === '' ? totalLength - 1 : parseInt(m[2], 10);
+  if (Number.isNaN(start)) start = 0;
+  if (Number.isNaN(end) || end >= totalLength) end = totalLength - 1;
+  if (start > end || start < 0) return null;
+  return [start, end];
+}
+
 // --- Serve generated images: /generated/:userId/:projectId/:campaignId/:filename (per-profile) ---
 async function serveGeneratedImage(req, res) {
   const { userId, projectId, campaignId, filename } = req.params;
@@ -3666,9 +4098,22 @@ async function serveGeneratedImage(req, res) {
     try {
       const buffer = await storage.readGeneratedBuffer(projectId, campaignId, filename, userId || undefined);
       const contentType = filename.toLowerCase().endsWith('.mp4') ? 'video/mp4' : 'image/jpeg';
+      const totalLength = buffer.length;
       res.set('Cache-Control', 'public, max-age=86400');
       res.set('Content-Type', contentType);
-      res.send(buffer);
+      res.set('Accept-Ranges', 'bytes');
+      const range = parseRange(req.headers.range, totalLength);
+      if (range) {
+        const [start, end] = range;
+        const chunk = buffer.slice(start, end + 1);
+        res.status(206);
+        res.set('Content-Range', `bytes ${start}-${end}/${totalLength}`);
+        res.set('Content-Length', chunk.length);
+        res.send(chunk);
+      } else {
+        res.set('Content-Length', totalLength);
+        res.send(buffer);
+      }
     } catch (e) {
       res.status(404).end();
     }
@@ -3681,6 +4126,7 @@ async function serveGeneratedImage(req, res) {
   const generatedResolved = path.resolve(GENERATED);
   if (!filePath.startsWith(generatedResolved)) return res.status(403).end();
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Accept-Ranges', 'bytes');
   res.sendFile(filePath, (err) => {
     if (err) res.status(err.statusCode || 500).end();
   });
@@ -3791,7 +4237,8 @@ cron.schedule('* * * * *', async () => {
         const postTypes = getPostTypesForPage(c, projectId);
         for (const pt of postTypes) {
           if (!isPostTypeDeployed(c, projectId, pt.id)) continue;
-          if (!pt.scheduleEnabled || !(pt.scheduleTimes || []).includes(currentTime)) continue;
+          const times = pt.scheduleTimes || c.scheduleTimes || [];
+          if (!pt.scheduleEnabled || !times.length || !times.map((t) => String(t)).includes(currentTime)) continue;
           if (c.campaignStartDate && todayStr < c.campaignStartDate) continue;
           if (c.campaignEndDate && todayStr > c.campaignEndDate) continue;
           if (pt.scheduleStartDate && todayStr < pt.scheduleStartDate) continue;
@@ -3803,24 +4250,61 @@ cron.schedule('* * * * *', async () => {
       }
     }
   }
-  if (!runs.length) return;
+  if (!runs.length) {
+    return;
+  }
   const config = getConfig();
+  const scheduledAtIso = getScheduleUtcIso(todayStr, currentTime, TZ);
+  console.log(`[scheduler] ${currentTime} (${todayStr}): ${runs.length} run(s) to execute`);
   for (const { userId: uid, campaign: c, projectId, postTypeId } of runs) {
+    const pt = getPostType(c, postTypeId, projectId);
+    const projects = getProjects(uid);
+    const project = projects.find((p) => p.id === parseInt(String(projectId), 10));
+    const accountId = project?.blotatoAccountId;
+    const apiKey = config?.blotatoApiKey;
+
+    if (process.env.ENCODING_MODE === 'worker' && pt && (pt.mediaType === 'video' || pt.mediaType === 'video_text')) {
+      try {
+        const payload = await buildEncodingJobPayload(uid, projectId, c.id, postTypeId, {
+          sendToBlotato: !!(apiKey && accountId),
+          draft: !!c.sendAsDraft,
+          scheduledAt: scheduledAtIso,
+          textStyleOverride: null,
+          textOptionsOverride: null,
+        });
+        if (payload) {
+          await enqueueEncodingJob(payload);
+          console.log(`[scheduler] ${c.name} (page ${projectId}/${c.id} pt ${postTypeId}): job queued for worker`);
+          continue;
+        }
+      } catch (e) {
+        console.error(`[scheduler] ${c.name} page ${projectId} enqueue:`, e.message);
+        await appendRunOutcome(projectId, c.id, postTypeId, scheduledAtIso, 'failure', e.message).catch(() => {});
+        continue;
+      }
+    }
+
     try {
       const result = await runCampaignPipeline(uid, projectId, c.id, null, null, postTypeId);
       console.log(`[scheduler] ${c.name} (page ${projectId}/${c.id} pt ${postTypeId}): ${result.webContentUrls.length} URLs`);
-      const projects = getProjects(uid);
-      const project = projects.find((p) => p.id === parseInt(String(projectId), 10));
-      const accountId = project?.blotatoAccountId;
-      const apiKey = config?.blotatoApiKey;
-      const pt = getPostType(c, postTypeId, projectId);
       const addMusicToCarousel = pt && pt.mediaType === 'photo' && !!c.addMusicToCarousel;
       if (apiKey && accountId && result.webContentUrls?.length) {
-        await sendToBlotato(apiKey, accountId, result.webContentUrls, { isDraft: c.sendAsDraft, addMusicToCarousel });
-        console.log(`[scheduler] Blotato post sent for ${c.name} page ${projectId}`);
+        try {
+          await sendToBlotato(apiKey, accountId, result.webContentUrls, { isDraft: c.sendAsDraft, addMusicToCarousel });
+          console.log(`[scheduler] Blotato post sent for ${c.name} page ${projectId}`);
+          await appendRunOutcome(projectId, c.id, postTypeId, scheduledAtIso, 'success');
+        } catch (blotatoErr) {
+          console.error(`[scheduler] Blotato failed ${c.name} page ${projectId}:`, blotatoErr.message);
+          await appendRunOutcome(projectId, c.id, postTypeId, scheduledAtIso, 'failure', blotatoErr.message);
+        }
+      } else {
+        if (!apiKey) console.warn(`[scheduler] Not sending to Blotato: no API key in Settings for ${c.name} page ${projectId}`);
+        else if (!accountId) console.warn(`[scheduler] Not sending to Blotato: page ${projectId} has no Blotato account linked for ${c.name}`);
+        else if (!result.webContentUrls?.length) console.warn(`[scheduler] No content URLs for ${c.name} page ${projectId}`);
       }
     } catch (e) {
       console.error(`[scheduler] ${c.name} page ${projectId}:`, e.message);
+      await appendRunOutcome(projectId, c.id, postTypeId, scheduledAtIso, 'failure', e.message).catch(() => {});
     }
   }
 });

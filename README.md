@@ -74,3 +74,5 @@ After this, redeploys and restarts keep your accounts, campaigns, trends, and me
 - `GET /generated/:projectId/:campaignId/:filename` — Serve generated image (the webContentUrl target).
 
 Schedule runs in the server’s local time (set `TZ` env var if needed, e.g. `TZ=America/New_York`).
+
+For offloading video encoding to a VPS, see **[VPS-WORKER.md](VPS-WORKER.md)**.

@@ -251,6 +251,17 @@
     </div>
   </div>
 
+  <!-- Upload progress bar (fixed at bottom, non-blocking) -->
+  <div class="upload-progress-wrap" id="uploadProgressWrap" hidden aria-live="polite" aria-label="Upload progress">
+    <div class="upload-progress-inner">
+      <span class="upload-progress-label" id="uploadProgressLabel">Uploading…</span>
+      <div class="upload-progress-track">
+        <div class="upload-progress-fill" id="uploadProgressFill"></div>
+      </div>
+      <span class="upload-progress-pct" id="uploadProgressPct">0%</span>
+    </div>
+  </div>
+
   <!-- App dialog: alert / confirm / prompt (replaces browser dialogs) -->
   <div class="modal-overlay app-dialog-overlay" id="appDialog" hidden>
     <div class="modal app-dialog">
