@@ -1042,6 +1042,7 @@ async function buildEncodingJobPayload(userId, projectId, campaignId, postTypeId
       type: hasPreset ? 'video_preset' : 'video',
       sourceUrl,
       presetUrl,
+      presetId: hasPreset ? pt.textPresetId : null,
       outputFilename,
       projectId: projectIdStr,
       campaignId: campaignIdStr,
@@ -1075,6 +1076,7 @@ async function buildEncodingJobPayload(userId, projectId, campaignId, postTypeId
         type: 'video_preset',
         sourceUrl,
         presetUrl: presetUrl2,
+        presetId: pt.textPresetId,
         outputFilename,
         projectId: projectIdStr,
         campaignId: campaignIdStr,
@@ -3446,7 +3448,7 @@ api.post('/encoding/jobs/:id/complete', requireEncodingWorker, async (req, res) 
         path.join(RUNS_DIR, `${campaignIdStr}.json`),
         JSON.stringify({ campaignId: campaignIdStr, runId: runData.runId, webContentUrls: runData.webContentUrls, at: runData.at }, null, 2)
       );
-      if (sendToBlotato && userId && projectId) {
+      if (userId && projectId) {
         const config = getConfig();
         const project = getProjects(userId).find((p) => String(p.id) === String(projectId));
         const accountId = project?.blotatoAccountId;
@@ -3457,6 +3459,9 @@ api.post('/encoding/jobs/:id/complete', requireEncodingWorker, async (req, res) 
             console.log(`[encoding] Blotato post sent for campaign ${campaignId} page ${projectId}`);
           } catch (blotatoErr) {
             console.error(`[encoding] Blotato failed:`, blotatoErr.message);
+            if (scheduledAt) {
+              await appendRunOutcome(projectId, campaignId, postTypeId, scheduledAt, 'failure', `Blotato: ${blotatoErr.message}`).catch(() => {});
+            }
           }
         }
       }

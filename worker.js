@@ -23,7 +23,7 @@ if (!storage.useSupabase()) {
 }
 
 const ffmpeg = require('fluent-ffmpeg');
-const FFMPEG_LOW_MEM_OPTS = ['-threads', '2', '-preset', 'superfast'];
+const FFMPEG_LOW_MEM_OPTS = ['-threads', '0', '-preset', 'ultrafast'];
 
 function fontColorToHex(str) {
   if (!str || typeof str !== 'string') return '0xFFFFFF';
@@ -225,17 +225,9 @@ async function processJob(job) {
       await addVideoTextOverlay(tmpIn, payload.text, payload.textStyle || {}, tmpOut);
       outBuf = await fs.readFile(tmpOut);
     } else if (type === 'video_preset') {
-      const presetExt = path.extname(payload.presetUrl.split('?')[0]) || '.mp4';
-      const tmpPreset = path.join(os.tmpdir(), `worker-preset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${presetExt}`);
-      try {
-        const presetRes = await fetch(payload.presetUrl, { headers: { Authorization: `Bearer ${SECRET}` } });
-        if (!presetRes.ok) throw new Error(`Preset download ${presetRes.status}`);
-        await fs.writeFile(tmpPreset, Buffer.from(await presetRes.arrayBuffer()));
-        await overlayPresetOnVideo(tmpIn, tmpPreset, tmpOut);
-        outBuf = await fs.readFile(tmpOut);
-      } finally {
-        await fs.unlink(tmpPreset).catch(() => {});
-      }
+      const presetPath = await getPresetPath(payload.presetId || payload.presetUrl, payload.presetUrl);
+      await overlayPresetOnVideo(tmpIn, presetPath, tmpOut);
+      outBuf = await fs.readFile(tmpOut);
     } else {
       throw new Error('Unknown job type: ' + type);
     }
@@ -254,7 +246,23 @@ async function processJob(job) {
   }
 }
 
-const POLL_MS = 15000;
+const POLL_MS = 2000;
+const PRESET_CACHE_DIR = path.join(os.tmpdir(), 'carousel-presets');
+
+async function getPresetPath(presetId, presetUrl) {
+  await fs.mkdir(PRESET_CACHE_DIR, { recursive: true });
+  const cached = path.join(PRESET_CACHE_DIR, String(presetId).replace(/[^a-z0-9_-]/gi, '_'));
+  try {
+    await fs.access(cached);
+    console.log(`[worker] Using cached preset: ${presetId}`);
+    return cached;
+  } catch {}
+  console.log(`[worker] Downloading preset: ${presetId}`);
+  const res = await fetch(presetUrl, { headers: { Authorization: `Bearer ${SECRET}` } });
+  if (!res.ok) throw new Error(`Preset download ${res.status}`);
+  await fs.writeFile(cached, Buffer.from(await res.arrayBuffer()));
+  return cached;
+}
 
 async function run() {
   console.log('[worker] Started, polling', BASE_URL);

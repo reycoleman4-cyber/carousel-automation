@@ -40,6 +40,7 @@ function generatedStoragePath(projectId, campaignId, filename, userId) {
   return `${pathPrefix(userId)}${projectId}/${campaignId}/${filename}`;
 }
 
+/** Create bucket if missing; use public: true so Blotato (and direct links) can fetch media without auth. */
 async function ensureBucket(bucket) {
   if (!supabase) return;
   try {
