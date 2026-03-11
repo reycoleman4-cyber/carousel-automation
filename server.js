@@ -3557,11 +3557,13 @@ api.get('/admin/export-data', requireEncodingWorker, (req, res) => {
   try {
     const { userId } = req.query;
     if (!userId) return res.status(400).json({ error: 'userId required' });
-    const projectsPath = getProjectsPath(userId);
-    const campaignsPath = getCampaignsPath(userId);
-    const projects = projectsPath ? readJson(projectsPath, []) : [];
-    const campaigns = campaignsPath ? readJson(campaignsPath, []) : [];
-    res.json({ projects, campaigns });
+    const projects = readJson(getProjectsPath(userId), { nextId: 1, items: [] });
+    const campaigns = readJson(getCampaignsPath(userId), { nextId: 1, items: [] });
+    const textPresets = readJson(getTextPresetsPath(userId), { nextId: 1, presets: [] });
+    const trends = readJson(getTrendsPath(userId), { nextId: 1, items: [] });
+    const logins = readJson(getLoginsPath(userId), { nextId: 1, items: [] });
+    const recurringPages = readJson(getRecurringPagesPath(userId), { projectIds: [] });
+    res.json({ projects, campaigns, textPresets, trends, logins, recurringPages });
   } catch (e) {
     res.status(500).json({ error: String(e.message) });
   }

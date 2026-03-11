@@ -5653,8 +5653,6 @@ async function populateSettingsPage(main) {
   if (!main) return;
   try {
     const [c, userSettings] = await Promise.all([apiConfig(), apiUserSettings().catch(() => ({}))]);
-    const input = main.querySelector('#settingsBaseUrl');
-    if (input) input.value = c.baseUrl || window.location.origin;
     const blotatoInput = main.querySelector('#settingsBlotatoApiKey');
     if (blotatoInput) blotatoInput.value = userSettings.blotatoApiKey || c.blotatoApiKey || '';
     const tzSelect = main.querySelector('#settingsTimezoneSelect');
@@ -5764,12 +5762,7 @@ function renderSettings() {
         <p class="hint">Calendar and campaign schedule times will be shown in this timezone.</p>
       </div>
       <div class="settings-section">
-        <h3 class="settings-subtitle">App config</h3>
-        <label class="field">
-          <span>Base URL (for webContentUrls)</span>
-          <input type="url" id="settingsBaseUrl" placeholder="https://your-server.com" />
-        </label>
-        <p class="hint">Set this to your public URL (e.g. ngrok or your domain) so Blotato can fetch generated images.</p>
+        <h3 class="settings-subtitle">Blotato</h3>
         <label class="field">
           <span>Blotato API Key</span>
           <input type="password" id="settingsBlotatoApiKey" placeholder="Your Blotato API key" autocomplete="off" />
@@ -5851,14 +5844,9 @@ function renderSettings() {
   main.querySelector('#saveSettings')?.addEventListener('click', () => {
     const tzSelect = main.querySelector('#settingsTimezoneSelect');
     if (tzSelect) try { localStorage.setItem(CALENDAR_TZ_STORAGE_KEY, tzSelect.value); } catch (_) {}
-    const input = main.querySelector('#settingsBaseUrl');
     const blotatoInput = main.querySelector('#settingsBlotatoApiKey');
-    const baseUrl = (input && input.value.trim()) || window.location.origin;
     const blotatoApiKey = (blotatoInput && blotatoInput.value.trim()) || '';
-    Promise.all([
-      apiSaveConfig({ baseUrl }),
-      apiSaveUserSettings({ blotatoApiKey }),
-    ]).then(() => {
+    apiSaveUserSettings({ blotatoApiKey }).then(() => {
       const btn = main.querySelector('#saveSettings');
       if (btn) { btn.textContent = 'Saved'; setTimeout(() => { btn.textContent = 'Save'; }, 2000); }
     }).catch(() => {});
