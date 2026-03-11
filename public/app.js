@@ -462,7 +462,7 @@ function campaignUploadWithProgress(projectId, campaignId, folderNum, files, pos
 }
 
 const ENCODING_JOB_POLL_MS = 2500;
-const ENCODING_JOB_POLL_MAX = 120000; // 2 min
+const ENCODING_JOB_POLL_MAX = 300000; // 5 min
 
 function pollEncodingJobUntilDone(jobId) {
   const start = Date.now();

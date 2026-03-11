@@ -23,7 +23,7 @@ if (!storage.useSupabase()) {
 }
 
 const ffmpeg = require('fluent-ffmpeg');
-const FFMPEG_LOW_MEM_OPTS = ['-threads', '1', '-preset', 'superfast'];
+const FFMPEG_LOW_MEM_OPTS = ['-threads', '2', '-preset', 'superfast'];
 
 function fontColorToHex(str) {
   if (!str || typeof str !== 'string') return '0xFFFFFF';
