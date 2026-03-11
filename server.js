@@ -2020,9 +2020,19 @@ api.get('/projects', (req, res) => {
 
 api.get('/projects/:projectId/avatar', async (req, res) => {
   const id = String(req.params.projectId);
-  const uid = req.user?.id;
+  let uid = req.user?.id;
   if (storage.useSupabase()) {
-    if (!uid) return res.status(401).end();
+    // <img> tags can't send Authorization headers, so fall back to scanning project files
+    if (!uid) {
+      try {
+        for (const filename of fsSync.readdirSync(PROJECTS_DIR)) {
+          if (!filename.endsWith('.json')) continue;
+          const projects = readJson(path.join(PROJECTS_DIR, filename), []);
+          if (projects.find((p) => String(p.id) === id)) { uid = filename.slice(0, -5); break; }
+        }
+      } catch (_) {}
+    }
+    if (!uid) return res.status(404).end();
     return res.redirect(storage.getAvatarUrl(uid, 'projects', id));
   }
   const exts = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic'];
@@ -2657,9 +2667,19 @@ api.delete('/campaigns/:campaignId', (req, res) => {
 api.get('/campaigns/:campaignId/avatar', async (req, res) => {
   const id = String(req.params.campaignId);
   if (storage.useSupabase()) {
-    const uid = req.user?.id;
-    if (!uid) return res.status(401).end();
-    const effectiveUid = await resolveEffectiveUserId(id, uid);
+    let uid = req.user?.id;
+    // <img> tags can't send Authorization headers, so fall back to scanning campaign files
+    if (!uid) {
+      try {
+        for (const filename of fsSync.readdirSync(CAMPAIGNS_DIR)) {
+          if (!filename.endsWith('.json')) continue;
+          const campaigns = readJson(path.join(CAMPAIGNS_DIR, filename), []);
+          if (campaigns.find((c) => String(c.id) === id)) { uid = filename.slice(0, -5); break; }
+        }
+      } catch (_) {}
+    }
+    if (!uid) return res.status(404).end();
+    const effectiveUid = req.user?.id ? await resolveEffectiveUserId(id, uid) : uid;
     return res.redirect(storage.getAvatarUrl(effectiveUid, 'campaigns', id));
   }
   const filePath = path.join(CAMPAIGN_AVATARS_DIR, `${id}.jpg`);
