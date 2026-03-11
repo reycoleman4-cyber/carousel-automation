@@ -1411,7 +1411,7 @@ async function overlayPresetOnVideo(basePath, presetPath, outputPath, options = 
   const H = 1920;
   const filterComplex = [
     '[0:v]scale=' + W + ':' + H + ':force_original_aspect_ratio=increase,crop=' + W + ':' + H + '[base]',
-    '[1:v]scale=' + W + ':' + H + ':force_original_aspect_ratio=decrease,pad=' + W + ':' + H + ':(ow-iw)/2:(oh-ih)/2:color=black,colorkey=0x000000:0.08:0.15,format=rgba[ck]',
+    '[1:v]scale=' + W + ':' + H + ':force_original_aspect_ratio=decrease,pad=' + W + ':' + H + ':(ow-iw)/2:(oh-ih)/2:color=black,colorkey=0x000000:0.08:0.15,format=yuva420p[ck]',
     '[base][ck]overlay=0:0:format=auto:shortest=1[out]'
   ].join(';');
   const proc = ffmpeg(basePath)
