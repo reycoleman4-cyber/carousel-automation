@@ -231,9 +231,29 @@ function showPrompt(message, defaultValue = '') {
   });
 }
 
+// --- Avatar version cache (prevents re-downloading unchanged avatars on every render) ---
+const _avatarVersions = {};
+function getAvatarVersion(type, id) {
+  const key = `${type}-${id}`;
+  if (!_avatarVersions[key]) _avatarVersions[key] = 1;
+  return _avatarVersions[key];
+}
+function bumpAvatarVersion(type, id) {
+  _avatarVersions[`${type}-${id}`] = Date.now();
+}
+
+// --- API response cache (avoids re-fetching project/campaign lists on every tab switch) ---
+const _apiCache = {};
+function apiCached(key, ttlMs, fetchFn) {
+  const hit = _apiCache[key];
+  if (hit && Date.now() - hit.ts < ttlMs) return Promise.resolve(hit.data);
+  return fetchFn().then((data) => { _apiCache[key] = { data, ts: Date.now() }; return data; });
+}
+function invalidateApiCache(key) { delete _apiCache[key]; }
+
 // --- API ---
 function apiProjects() {
-  return apiWithAuth(`${API}/api/projects`).then((r) => r.json());
+  return apiCached('projects', 30000, () => apiWithAuth(`${API}/api/projects`).then((r) => r.json()));
 }
 function apiProject(projectId) {
   return apiWithAuth(`${API}/api/projects/${projectId}`).then((r) => {
@@ -246,7 +266,7 @@ function apiCreateProject(name) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: name || 'New project' }),
-  }).then((r) => r.json());
+  }).then((r) => r.json()).then((d) => { invalidateApiCache('projects'); return d; });
 }
 function apiUpdateProject(id, data) {
   return apiWithAuth(`${API}/api/projects/${id}`, {
@@ -256,7 +276,7 @@ function apiUpdateProject(id, data) {
   }).then((r) => r.json());
 }
 function apiDeleteProject(id) {
-  return apiWithAuth(`${API}/api/projects/${id}`, { method: 'DELETE' }).then((r) => r.json());
+  return apiWithAuth(`${API}/api/projects/${id}`, { method: 'DELETE' }).then((r) => r.json()).then((d) => { invalidateApiCache('projects'); return d; });
 }
 function apiRecurringPagesGet() {
   return apiWithAuth(`${API}/api/recurring-pages`).then((r) => r.json()).then((d) => d.projectIds || []);
@@ -281,7 +301,7 @@ function apiCreateCampaign(projectId, name, options) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  }).then((r) => r.json());
+  }).then((r) => r.json()).then((d) => { invalidateApiCache('allCampaigns'); return d; });
 }
 function apiCampaign(projectId, campaignId, postTypeId) {
   const url = postTypeId ? `${API}/api/projects/${projectId}/campaigns/${campaignId}?postTypeId=${encodeURIComponent(postTypeId)}` : `${API}/api/projects/${projectId}/campaigns/${campaignId}`;
@@ -301,12 +321,13 @@ function apiUpdateCampaign(projectId, campaignId, data, postTypeId) {
   });
 }
 function apiDeleteCampaign(projectId, campaignId) {
-  return apiWithAuth(`${API}/api/projects/${projectId}/campaigns/${campaignId}`, { method: 'DELETE' }).then((r) => r.json());
+  return apiWithAuth(`${API}/api/projects/${projectId}/campaigns/${campaignId}`, { method: 'DELETE' }).then((r) => r.json()).then((d) => { invalidateApiCache('allCampaigns'); return d; });
 }
 function apiDeleteCampaignById(campaignId) {
   return apiWithAuth(`${API}/api/campaigns/${campaignId}`, { method: 'DELETE' }).then(async (r) => {
     const text = await r.text();
     if (!r.ok) throw new Error(tryParse(text).error || text || 'Failed to delete campaign');
+    invalidateApiCache('allCampaigns');
     return text ? JSON.parse(text) : {};
   });
 }
@@ -373,7 +394,7 @@ function apiUploadProjectAvatar(projectId, file) {
   });
 }
 function projectAvatarUrl(projectId) {
-  return `${API}/api/projects/${projectId}/avatar?t=${Date.now()}`;
+  return `${API}/api/projects/${projectId}/avatar?v=${getAvatarVersion('project', projectId)}`;
 }
 
 /** Show the global upload progress bar at the bottom; percent 0–100, label e.g. "Uploading videos…" */
@@ -541,7 +562,7 @@ function apiClearCampaignUrls(projectId, campaignId) {
   return apiWithAuth(`${API}/api/projects/${projectId}/campaigns/${campaignId}/latest`, { method: 'DELETE' }).then((r) => r.json());
 }
 function apiAllCampaigns() {
-  return apiWithAuth(`${API}/api/campaigns`).then((r) => r.json());
+  return apiCached('allCampaigns', 30000, () => apiWithAuth(`${API}/api/campaigns`).then((r) => r.json()));
 }
 function apiCreateCampaignWithPages(name, pageIds) {
   return apiWithAuth(`${API}/api/campaigns`, {
@@ -567,10 +588,10 @@ function apiUploadCampaignAvatar(campaignId, file) {
   });
 }
 function campaignAvatarUrl(campaignId) {
-  return `${API}/api/campaigns/${campaignId}/avatar?t=${Date.now()}`;
+  return `${API}/api/campaigns/${campaignId}/avatar?v=${getAvatarVersion('campaign', campaignId)}`;
 }
 function trendAvatarUrl(trendId) {
-  return `${API}/api/trends/${trendId}/avatar?t=${Date.now()}`;
+  return `${API}/api/trends/${trendId}/avatar?v=${getAvatarVersion('trend', trendId)}`;
 }
 function apiUploadTrendAvatar(trendId, file) {
   const form = new FormData();
@@ -1741,6 +1762,7 @@ function renderProject(projectId) {
         const file = e.target.files && e.target.files[0];
         if (!file) return;
         apiUploadProjectAvatar(String(project.id), file).then(() => {
+          bumpAvatarVersion('project', project.id);
           if (avatarPreview) {
             avatarPreview.innerHTML = `<img src="${projectAvatarUrl(project.id)}" alt="" class="project-avatar-img" />`;
             avatarPreview.style.cursor = 'pointer';
@@ -3008,6 +3030,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
         const file = e.target.files?.[0];
         if (!file) return;
         apiUploadCampaignAvatar(cid, file).then(() => {
+          bumpAvatarVersion('campaign', cid);
           if (campAvatarImg) { campAvatarImg.src = campaignAvatarUrl(cid); campAvatarImg.style.display = ''; campAvatarPlaceholder && (campAvatarPlaceholder.style.display = 'none'); }
           campAvatarInput.value = '';
         }).catch((err) => showAlert(err.message || 'Upload failed'));
@@ -4071,6 +4094,7 @@ function renderCampaignDetail(campaignId) {
         const file = e.target.files?.[0];
         if (!file) return;
         apiUploadCampaignAvatar(cid, file).then(() => {
+          bumpAvatarVersion('campaign', cid);
           if (avatarImg) { avatarImg.src = campaignAvatarUrl(cid); avatarImg.style.display = ''; avatarPlaceholder && (avatarPlaceholder.style.display = 'none'); }
           avatarInput.value = '';
         }).catch((err) => showAlert(err.message || 'Upload failed'));
@@ -4396,6 +4420,7 @@ function openEditAvatarModal(type, id, imageUrl, onSuccess) {
       const file = new File([blob], 'avatar.jpg', { type: 'image/jpeg' });
       const upload = type === 'project' ? apiUploadProjectAvatar(String(id), file) : apiUploadCampaignAvatar(String(id), file);
       upload.then(() => {
+        bumpAvatarVersion(type, id);
         modal.hidden = true;
         if (onSuccess) onSuccess();
       }).catch((err) => showAlert(err.message || 'Upload failed'));

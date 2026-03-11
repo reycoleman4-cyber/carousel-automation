@@ -2038,7 +2038,10 @@ api.get('/projects/:projectId/avatar', (req, res) => {
   const exts = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic'];
   for (const ext of exts) {
     const filePath = path.join(AVATARS_DIR, id + ext);
-    if (fsSync.existsSync(filePath)) return res.sendFile(path.resolve(filePath));
+    if (fsSync.existsSync(filePath)) {
+      res.set('Cache-Control', 'public, max-age=86400');
+      return res.sendFile(path.resolve(filePath));
+    }
   }
   res.status(404).end();
 });
@@ -2671,7 +2674,7 @@ api.delete('/campaigns/:campaignId', (req, res) => {
 api.get('/campaigns/:campaignId/avatar', (req, res) => {
   const id = String(req.params.campaignId);
   const filePath = path.join(CAMPAIGN_AVATARS_DIR, `${id}.jpg`);
-  if (fsSync.existsSync(filePath)) return res.sendFile(path.resolve(filePath));
+  if (fsSync.existsSync(filePath)) { res.set('Cache-Control', 'public, max-age=86400'); return res.sendFile(path.resolve(filePath)); }
   res.status(404).end();
 });
 
@@ -3792,7 +3795,7 @@ api.delete('/trends/:trendId', (req, res) => {
 api.get('/trends/:trendId/avatar', (req, res) => {
   const id = String(req.params.trendId);
   const filePath = path.join(TREND_AVATARS_DIR, `${id}.jpg`);
-  if (fsSync.existsSync(filePath)) return res.sendFile(path.resolve(filePath));
+  if (fsSync.existsSync(filePath)) { res.set('Cache-Control', 'public, max-age=86400'); return res.sendFile(path.resolve(filePath)); }
   res.status(404).end();
 });
 
