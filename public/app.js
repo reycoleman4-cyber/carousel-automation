@@ -135,6 +135,7 @@ async function handleAuthSignup(e) {
   const authSignupSuccess = document.getElementById('authSignupSuccess');
   const email = (document.getElementById('authSignupEmail')?.value || '').trim();
   const password = document.getElementById('authSignupPassword')?.value || '';
+  const fullName = (document.getElementById('authSignupFullName')?.value || '').trim();
   if (authSignupError) authSignupError.hidden = true;
   if (authSignupSuccess) authSignupSuccess.hidden = true;
   if (!email || !password) {
@@ -150,7 +151,7 @@ async function handleAuthSignup(e) {
     return;
   }
   try {
-    const { error } = await supabaseClient.auth.signUp({ email, password });
+    const { error } = await supabaseClient.auth.signUp({ email, password, options: fullName ? { data: { full_name: fullName } } : undefined });
     if (error) throw error;
     if (authSignupSuccess) authSignupSuccess.hidden = false;
     if (authSignupError) authSignupError.hidden = true;
@@ -761,25 +762,35 @@ function apiSaveConfig(data) {
     body: JSON.stringify(data),
   }).then((r) => r.json());
 }
+function apiUserSettings() {
+  return apiWithAuth(`${API}/api/settings`).then((r) => r.json());
+}
+function apiSaveUserSettings(data) {
+  return apiWithAuth(`${API}/api/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  }).then((r) => r.json());
+}
 function apiLogins() {
-  return fetch(`${API}/api/logins`).then((r) => r.json());
+  return apiWithAuth(`${API}/api/logins`).then((r) => r.json());
 }
 function apiCreateLogin(data) {
-  return fetch(`${API}/api/logins`, {
+  return apiWithAuth(`${API}/api/logins`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   }).then((r) => r.json());
 }
 function apiUpdateLogin(id, data) {
-  return fetch(`${API}/api/logins/${id}`, {
+  return apiWithAuth(`${API}/api/logins/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   }).then((r) => r.json());
 }
 function apiDeleteLogin(id) {
-  return fetch(`${API}/api/logins/${id}`, { method: 'DELETE' }).then((r) => {
+  return apiWithAuth(`${API}/api/logins/${id}`, { method: 'DELETE' }).then((r) => {
     if (r.status === 204) return;
     return r.json().then((d) => Promise.reject(new Error(d.error || 'Delete failed')));
   });
@@ -3750,6 +3761,9 @@ function renderCampaigns() {
         const releaseTypeBadge = c.releaseType && releaseTypeLabels[c.releaseType]
           ? `<span class="release-type-badge release-type-${c.releaseType}">${escapeHtml(releaseTypeLabels[c.releaseType])}</span>`
           : '';
+        const sharedBadge = c._sharedOwnerId
+          ? `<span class="release-type-badge" style="background:#6366f1;color:#fff;font-size:0.7em;">Shared by @${escapeHtml(c._sharedOwnerUsername || c._sharedOwnerId)}</span>`
+          : '';
         const avatarImg = `<img src="${campaignAvatarUrl(c.id)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(c.name || 'C').charAt(0).toUpperCase()}</span>`;
         return `
           <div class="campaigns-list-item">
@@ -3760,12 +3774,13 @@ function renderCampaigns() {
                   <div class="list-card-title-row">
                     <span class="list-card-title">${escapeHtml(c.name)}</span>
                     ${releaseTypeBadge ? releaseTypeBadge : ''}
+                    ${sharedBadge}
                   </div>
                   <span class="list-card-meta">${releaseLabel ? escapeHtml(releaseLabel) : 'No release date'}</span>
                 </div>
               </div>
             </a>
-            <button type="button" class="btn btn-ghost btn-sm list-card-action" data-action="delete-campaign" data-cid="${c.id}" data-cname="${escapeHtml(c.name)}" aria-label="Delete campaign">Delete</button>
+            ${!c._sharedOwnerId ? `<button type="button" class="btn btn-ghost btn-sm list-card-action" data-action="delete-campaign" data-cid="${c.id}" data-cname="${escapeHtml(c.name)}" aria-label="Delete campaign">Delete</button>` : ''}
           </div>
         `;
       }).join('');
@@ -4157,40 +4172,55 @@ function renderCampaignDetail(campaignId) {
       openAddPageModal(cid, pageIds, available, () => renderCampaignDetail(cid));
     };
 
-    const memberUsernames = campaign.memberUsernames || [];
+    // Campaign members (real API — owner can add/remove, members are shown to all)
     const campaignTeamList = document.getElementById('campaignTeamList');
     const campaignTeamError = document.getElementById('campaignTeamError');
     const campaignTeamUsername = document.getElementById('campaignTeamUsername');
     const campaignTeamAddBtn = document.getElementById('campaignTeamAddBtn');
-    if (campaignTeamList) {
-      campaignTeamList.innerHTML = memberUsernames.length
-        ? memberUsernames.map((u, i) => `<li class="settings-team-item"><span>${escapeHtml(u)}</span> <button type="button" class="btn btn-ghost btn-sm" data-campaign-remove-index="${i}" aria-label="Remove">Remove</button></li>`).join('')
-        : '<li class="hint">No team members yet. Add by username above.</li>';
+    const isSharedCampaign = !!(campaign._sharedOwnerId);
+    async function refreshCampaignMembers() {
+      if (!campaignTeamList) return;
+      try {
+        const members = await apiWithAuth(`${API}/api/campaigns/${cid}/members`).then((r) => r.json());
+        if (!Array.isArray(members) || !members.length) {
+          campaignTeamList.innerHTML = '<li class="hint">No team members yet. Add by username above.</li>';
+          return;
+        }
+        campaignTeamList.innerHTML = members.map((m) =>
+          `<li class="settings-team-item"><span>${escapeHtml(m.full_name || m.username || m.member_id)}</span><span class="hint" style="font-size:0.8em;margin-left:6px;">@${escapeHtml(m.username || '')}</span>${!isSharedCampaign ? ` <button type="button" class="btn btn-ghost btn-sm" data-campaign-remove-member="${escapeHtml(m.member_id)}" aria-label="Remove">Remove</button>` : ''}</li>`
+        ).join('');
+      } catch (_) {
+        campaignTeamList.innerHTML = '<li class="hint">Could not load members.</li>';
+      }
     }
-    if (campaignTeamAddBtn && campaignTeamUsername) {
-      campaignTeamAddBtn.onclick = () => {
+    refreshCampaignMembers();
+    if (!isSharedCampaign && campaignTeamAddBtn && campaignTeamUsername) {
+      campaignTeamAddBtn.onclick = async () => {
         const username = campaignTeamUsername.value.trim();
         if (!username) return;
         if (campaignTeamError) campaignTeamError.hidden = true;
-        const next = [...(campaign.memberUsernames || []), username];
-        apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, campaignStartDate: campaign.campaignStartDate, campaignEndDate: campaign.campaignEndDate, memberUsernames: next, notes: campaign.notes ?? '' }) })
-          .then((r) => r.json())
-          .then((c) => { campaign = c; campaignTeamUsername.value = ''; renderCampaignDetail(cid); })
-          .catch((err) => { if (campaignTeamError) { campaignTeamError.textContent = err.message || 'Failed'; campaignTeamError.hidden = false; } });
+        try {
+          const r = await apiWithAuth(`${API}/api/campaigns/${cid}/members`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username }) });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d.error || 'Failed to add member');
+          campaignTeamUsername.value = '';
+          refreshCampaignMembers();
+        } catch (err) {
+          if (campaignTeamError) { campaignTeamError.textContent = err.message || 'Failed'; campaignTeamError.hidden = false; }
+        }
       };
     }
-    if (campaignTeamList) {
-      campaignTeamList.onclick = (e) => {
-        const idx = e.target.dataset.campaignRemoveIndex;
-        if (idx === undefined) return;
-        const list = campaign.memberUsernames || [];
-        const next = list.filter((_, i) => String(i) !== String(idx));
-        apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, campaignStartDate: campaign.campaignStartDate, campaignEndDate: campaign.campaignEndDate, memberUsernames: next, notes: campaign.notes ?? '' }) })
-          .then((r) => r.json())
-          .then((c) => { campaign = c; renderCampaignDetail(cid); })
-          .catch((err) => showAlert(err.message || 'Failed'));
-      };
+    if (!isSharedCampaign && campaignTeamList) {
+      campaignTeamList.addEventListener('click', async (e) => {
+        const memberId = e.target.dataset.campaignRemoveMember;
+        if (!memberId) return;
+        try {
+          await apiWithAuth(`${API}/api/campaigns/${cid}/members/${memberId}`, { method: 'DELETE' });
+          refreshCampaignMembers();
+        } catch (err) { showAlert(err.message || 'Failed'); }
+      });
     }
+    if (isSharedCampaign && campaignTeamAddBtn) campaignTeamAddBtn.style.display = 'none';
 
     const campaignTrendsList = document.getElementById('campaignTrendsList');
     const trends = Array.isArray(campaignTrends) ? campaignTrends : [];
@@ -5592,11 +5622,11 @@ function render() {
 async function populateSettingsPage(main) {
   if (!main) return;
   try {
-    const c = await apiConfig();
+    const [c, userSettings] = await Promise.all([apiConfig(), apiUserSettings().catch(() => ({}))]);
     const input = main.querySelector('#settingsBaseUrl');
     if (input) input.value = c.baseUrl || window.location.origin;
     const blotatoInput = main.querySelector('#settingsBlotatoApiKey');
-    if (blotatoInput) blotatoInput.value = c.blotatoApiKey || '';
+    if (blotatoInput) blotatoInput.value = userSettings.blotatoApiKey || c.blotatoApiKey || '';
     const tzSelect = main.querySelector('#settingsTimezoneSelect');
     if (tzSelect) {
       const serverTz = c.timezone || 'America/New_York';
@@ -5795,7 +5825,10 @@ function renderSettings() {
     const blotatoInput = main.querySelector('#settingsBlotatoApiKey');
     const baseUrl = (input && input.value.trim()) || window.location.origin;
     const blotatoApiKey = (blotatoInput && blotatoInput.value.trim()) || '';
-    apiSaveConfig({ baseUrl, blotatoApiKey }).then(() => {
+    Promise.all([
+      apiSaveConfig({ baseUrl }),
+      apiSaveUserSettings({ blotatoApiKey }),
+    ]).then(() => {
       const btn = main.querySelector('#saveSettings');
       if (btn) { btn.textContent = 'Saved'; setTimeout(() => { btn.textContent = 'Save'; }, 2000); }
     }).catch(() => {});

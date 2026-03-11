@@ -24,7 +24,8 @@ const CAMPAIGNS_PATH = path.join(DATA, 'campaigns.json');
 const PROJECTS_DIR = path.join(DATA, 'projects');
 const CAMPAIGNS_DIR = path.join(DATA, 'campaigns');
 const CONFIG_PATH = path.join(DATA, 'config.json');
-const LOGINS_PATH = path.join(DATA, 'logins.json');
+const LOGINS_DIR = path.join(DATA, 'logins');
+const LOGINS_PATH = path.join(DATA, 'logins.json'); // legacy global path (migrated on first access)
 const RUNS_DIR = path.join(DATA, 'runs');
 const RUN_OUTCOMES_PATH = path.join(DATA, 'run-outcomes.json');
 const ENCODING_QUEUE_PATH = path.join(DATA, 'encoding-queue.json');
@@ -383,6 +384,111 @@ function deleteCampaign(campaignId, userId) {
   const meta = getCampaignsMeta(userId);
   const items = (meta.items || []).filter((c) => c.id !== campaignId);
   writeJson(getCampaignsPath(userId), { ...meta, items });
+}
+
+// --- Multi-user: shared campaign helpers ---
+
+/**
+ * For a given campaignId + requesting userId, returns the effective owner userId.
+ * If the requesting user is a campaign_member, returns the owner's userId so all
+ * file paths resolve to the owner's data. Returns requestingUserId if it's their own campaign.
+ */
+async function resolveEffectiveUserId(campaignId, requestingUserId) {
+  if (!supabaseAdmin || !campaignId || !requestingUserId) return requestingUserId;
+  try {
+    const { data } = await supabaseAdmin
+      .from('campaign_members')
+      .select('owner_id')
+      .eq('campaign_id', parseInt(campaignId, 10))
+      .eq('member_id', requestingUserId)
+      .maybeSingle();
+    return data ? data.owner_id : requestingUserId;
+  } catch { return requestingUserId; }
+}
+
+/**
+ * Returns all campaigns shared with userId (where they are a member, not the owner).
+ * Each campaign is tagged with _sharedOwnerId and _sharedOwnerUsername.
+ */
+async function getSharedCampaigns(userId) {
+  if (!supabaseAdmin || !userId) return [];
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('campaign_members')
+      .select('owner_id, campaign_id')
+      .eq('member_id', userId);
+    if (error || !data || !data.length) return [];
+    const ownerIds = [...new Set(data.map((r) => r.owner_id))];
+    const { data: profiles } = await supabaseAdmin.from('profiles').select('id, username, full_name').in('id', ownerIds);
+    const profileMap = (profiles || []).reduce((m, p) => { m[p.id] = p; return m; }, {});
+    const result = [];
+    for (const row of data) {
+      const ownerCampaigns = getAllCampaigns(row.owner_id);
+      const campaign = ownerCampaigns.find((c) => c.id === row.campaign_id);
+      if (campaign) {
+        const owner = profileMap[row.owner_id] || {};
+        result.push({ ...campaign, _sharedOwnerId: row.owner_id, _sharedOwnerUsername: owner.username || row.owner_id });
+      }
+    }
+    return result;
+  } catch { return []; }
+}
+
+/** Get user settings from Supabase user_settings table. Falls back to global config for blotato key. */
+async function getUserSettings(userId) {
+  if (!supabaseAdmin || !userId) {
+    const cfg = getConfig();
+    return { blotatoApiKey: cfg.blotatoApiKey || '', timezone: process.env.TZ || 'America/New_York' };
+  }
+  try {
+    const { data } = await supabaseAdmin.from('user_settings').select('blotato_api_key, timezone').eq('user_id', userId).maybeSingle();
+    if (data) return { blotatoApiKey: data.blotato_api_key || '', timezone: data.timezone || process.env.TZ || 'America/New_York' };
+    // Fall back to global config for existing single-user setups
+    const cfg = getConfig();
+    return { blotatoApiKey: cfg.blotatoApiKey || '', timezone: process.env.TZ || 'America/New_York' };
+  } catch {
+    const cfg = getConfig();
+    return { blotatoApiKey: cfg.blotatoApiKey || '', timezone: process.env.TZ || 'America/New_York' };
+  }
+}
+
+async function saveUserSettings(userId, settings) {
+  if (!supabaseAdmin || !userId) { setConfig(settings); return; }
+  try {
+    await supabaseAdmin.from('user_settings').upsert({
+      user_id: userId,
+      blotato_api_key: settings.blotatoApiKey ?? '',
+      timezone: settings.timezone ?? (process.env.TZ || 'America/New_York'),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id' });
+  } catch { setConfig(settings); }
+}
+
+// --- Per-user logins ---
+function getLoginsPath(userId) {
+  if (!userId) return LOGINS_PATH;
+  const safe = String(userId).replace(/[/\\]/g, '_');
+  fsSync.mkdirSync(path.join(DATA, 'logins'), { recursive: true });
+  return path.join(DATA, 'logins', `${safe}.json`);
+}
+
+function getLoginsDataForUser(userId) {
+  const userPath = getLoginsPath(userId);
+  // Migrate from global logins.json on first access
+  if (!fsSync.existsSync(userPath) && userId && fsSync.existsSync(LOGINS_PATH)) {
+    try {
+      const global = readJson(LOGINS_PATH, { nextId: 1, items: [] });
+      writeJson(userPath, global);
+    } catch (_) {}
+  }
+  return readJson(userPath, { nextId: 1, items: [] });
+}
+
+function getLoginsForUser(userId) { return (getLoginsDataForUser(userId).items || []).slice(); }
+
+function saveLoginsForUser(userId, items, nextId) {
+  const data = getLoginsDataForUser(userId);
+  writeJson(getLoginsPath(userId), { nextId: nextId !== undefined ? nextId : data.nextId, items: items || data.items || [] });
 }
 
 // --- Trends (shared text at top, one folder of photos per page) ---
@@ -2064,12 +2170,13 @@ api.delete('/recurring-pages/:projectId', (req, res) => {
 });
 
 // --- API: Campaigns ---
-api.get('/projects/:projectId/campaigns', (req, res) => {
+api.get('/projects/:projectId/campaigns', async (req, res) => {
   const uid = requireUserId(req, res);
   if (!uid) return;
   const projectId = parseInt(req.params.projectId, 10);
   const list = getCampaigns(projectId, uid);
-  res.json(list);
+  const shared = (await getSharedCampaigns(uid)).filter((c) => campaignBelongsToPage(c, projectId));
+  res.json([...list, ...shared]);
 });
 
 api.post('/projects/:projectId/campaigns', (req, res) => {
@@ -2176,13 +2283,14 @@ function campaignBelongsToPage(campaign, projectId) {
   return campaign.projectId === pid;
 }
 
-api.get('/projects/:projectId/campaigns/:campaignId', (req, res) => {
+api.get('/projects/:projectId/campaigns/:campaignId', async (req, res) => {
   const uid = requireUserId(req, res);
   if (!uid) return;
   const campaignId = parseInt(req.params.campaignId, 10);
   const projectId = req.params.projectId;
   const postTypeId = req.query.postTypeId || 'default';
-  const campaign = getCampaignById(campaignId, uid);
+  const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+  const campaign = getCampaignById(campaignId, effectiveUid);
   if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
   const campaignWithPostTypes = ensurePostTypes(campaign, projectId);
   const normalized = normalizeCampaign(campaignWithPostTypes, projectId);
@@ -2214,13 +2322,14 @@ api.get('/projects/:projectId/campaigns/:campaignId', (req, res) => {
   res.json(normalized);
 });
 
-api.put('/projects/:projectId/campaigns/:campaignId', (req, res) => {
+api.put('/projects/:projectId/campaigns/:campaignId', async (req, res) => {
   const uid = requireUserId(req, res);
   if (!uid) return;
   const campaignId = parseInt(req.params.campaignId, 10);
   const projectId = parseInt(req.params.projectId, 10);
   const postTypeId = req.body.postTypeId || 'default';
-  const campaign = getCampaignById(campaignId, uid);
+  const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+  const campaign = getCampaignById(campaignId, effectiveUid);
   if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
   const pt = getPostType(campaign, postTypeId, projectId);
   if (!pt) return res.status(404).json({ error: 'Post type not found' });
@@ -2276,16 +2385,17 @@ api.put('/projects/:projectId/campaigns/:campaignId', (req, res) => {
     sendAsDraft: req.body.sendAsDraft !== undefined ? !!req.body.sendAsDraft : campaign.sendAsDraft,
     addMusicToCarousel: req.body.addMusicToCarousel !== undefined ? !!req.body.addMusicToCarousel : campaign.addMusicToCarousel,
   };
-  saveCampaign(updated, uid);
+  saveCampaign(updated, effectiveUid);
   res.json(ensurePostTypes(updated, projectId));
 });
 
-api.post('/projects/:projectId/campaigns/:campaignId/postTypes', (req, res) => {
+api.post('/projects/:projectId/campaigns/:campaignId/postTypes', async (req, res) => {
   const uid = requireUserId(req, res);
   if (!uid) return;
   const campaignId = parseInt(req.params.campaignId, 10);
   const projectId = parseInt(req.params.projectId, 10);
-  const campaign = getCampaignById(campaignId, uid);
+  const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+  const campaign = getCampaignById(campaignId, effectiveUid);
   if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
   const name = (req.body.name || 'New post type').trim() || 'New post type';
   const mediaType = req.body.mediaType === 'video_text' ? 'video_text' : (req.body.mediaType === 'video' ? 'video' : 'photo');
@@ -2309,19 +2419,20 @@ api.post('/projects/:projectId/campaigns/:campaignId/postTypes', (req, res) => {
   const pagePts = [...(pagePostTypes[projectId] || []), newPt];
   pagePostTypes[projectId] = pagePts;
   const updated = { ...campaign, pagePostTypes };
-  saveCampaign(updated, uid);
-  ensureDirs(uid, String(projectId), String(campaignId), folderCount, id);
+  saveCampaign(updated, effectiveUid);
+  ensureDirs(effectiveUid, String(projectId), String(campaignId), folderCount, id);
   const result = ensurePostTypes(updated, projectId);
   res.status(201).json(result);
 });
 
-api.put('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId', (req, res) => {
+api.put('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId', async (req, res) => {
   const uid = requireUserId(req, res);
   if (!uid) return;
   const campaignId = parseInt(req.params.campaignId, 10);
   const projectId = parseInt(req.params.projectId, 10);
   const postTypeId = req.params.postTypeId;
-  const campaign = getCampaignById(campaignId, uid);
+  const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+  const campaign = getCampaignById(campaignId, effectiveUid);
   if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
   const pt = getPostType(campaign, postTypeId, projectId);
   if (!pt) return res.status(404).json({ error: 'Post type not found' });
@@ -2343,7 +2454,7 @@ api.put('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId', (req
       textOptionsPerFolder: [[], []],
       textStylePerFolder: [],
     };
-    ensureDirs(uid, String(projectId), String(campaignId), 2, pt.id);
+    ensureDirs(effectiveUid, String(projectId), String(campaignId), 2, pt.id);
   }
   if (mediaType === 'video_text') {
     updatedPt = {
@@ -2352,13 +2463,13 @@ api.put('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId', (req
       textOptionsPerFolder: Array.isArray(pt.textOptionsPerFolder) && pt.textOptionsPerFolder.length ? [pt.textOptionsPerFolder[0]] : [[]],
       textStylePerFolder: Array.isArray(pt.textStylePerFolder) && pt.textStylePerFolder.length ? [pt.textStylePerFolder[0]] : [{}],
     };
-    ensureDirs(uid, String(projectId), String(campaignId), 1, pt.id);
+    ensureDirs(effectiveUid, String(projectId), String(campaignId), 1, pt.id);
   }
   if (ptIdx >= 0) pagePts[ptIdx] = updatedPt;
   else pagePts.push(updatedPt);
   pagePostTypes[projectId] = pagePts;
   const updated = { ...campaign, pagePostTypes };
-  saveCampaign(updated, uid);
+  saveCampaign(updated, effectiveUid);
   res.json(ensurePostTypes(updated, projectId));
 });
 
@@ -2368,10 +2479,11 @@ api.delete('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId', a
   const campaignId = parseInt(req.params.campaignId, 10);
   const projectId = parseInt(req.params.projectId, 10);
   const postTypeId = req.params.postTypeId;
-  const campaign = getCampaignById(campaignId, uid);
+  const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+  const campaign = getCampaignById(campaignId, effectiveUid);
   if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
   try {
-    await storage.deleteAllUploadsForPostType(String(projectId), String(campaignId), postTypeId, uid);
+    await storage.deleteAllUploadsForPostType(String(projectId), String(campaignId), postTypeId, effectiveUid);
   } catch (e) {
     console.warn('[delete post type] storage cleanup:', e.message);
   }
@@ -2379,7 +2491,7 @@ api.delete('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId', a
   const pagePts = (pagePostTypes[projectId] || []).filter((p) => p.id !== postTypeId);
   pagePostTypes[projectId] = pagePts;
   const updated = { ...campaign, pagePostTypes };
-  saveCampaign(updated, uid);
+  saveCampaign(updated, effectiveUid);
   res.json(ensurePostTypes(updated, projectId));
 });
 
@@ -2415,6 +2527,9 @@ api.delete('/projects/:projectId/campaigns/:campaignId', async (req, res) => {
   if (!uid) return;
   const campaignId = parseInt(req.params.campaignId, 10);
   const projectId = parseInt(req.params.projectId, 10);
+  // Only the owner can delete a campaign — members cannot
+  const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+  if (effectiveUid !== uid) return res.status(403).json({ error: 'Only the campaign owner can delete it' });
   const campaign = getCampaignById(campaignId, uid);
   if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
   if (campaign.pageIds && campaign.pageIds.length > 1) {
@@ -2447,17 +2562,18 @@ api.delete('/projects/:projectId/campaigns/:campaignId', async (req, res) => {
   res.json({ ok: true });
 });
 
-api.get('/campaigns', (req, res) => {
+api.get('/campaigns', async (req, res) => {
   const uid = requireUserId(req, res);
   if (!uid) return;
   const all = getAllCampaigns(uid);
-  const campaigns = all.filter((c) => {
+  const own = all.filter((c) => {
     if (c.isPageNative) return false;
     const pageIds = (c.pageIds && c.pageIds.length) ? c.pageIds : (c.projectId != null ? [c.projectId] : []);
     const isSinglePageRecurring = pageIds.length === 1 && (c.name === 'Recurring posts' || c.name === 'Recurring post');
     return !isSinglePageRecurring;
   });
-  res.json(campaigns);
+  const shared = await getSharedCampaigns(uid);
+  res.json([...own, ...shared]);
 });
 
 api.get('/campaigns/:campaignId/deployed-posts-count', async (req, res) => {
@@ -2652,12 +2768,13 @@ api.get('/projects/:projectId/campaigns/:campaignId/folders', async (req, res) =
     const projectId = String(req.params.projectId);
     const campaignId = String(req.params.campaignId);
     const postTypeId = req.query.postTypeId || 'default';
-    const campaign = getCampaignById(campaignId, uid);
+    const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+    const campaign = getCampaignById(campaignId, effectiveUid);
     const pt = getPostType(campaign, postTypeId, projectId);
     const isVideo = pt && (pt.mediaType === 'video' || pt.mediaType === 'video_text');
     const folderCount = pt && pt.mediaType === 'video_text' ? 1 : (pt && pt.mediaType === 'video' ? 2 : (pt ? Math.max(1, pt.folderCount || 3) : Math.max(1, (campaign && campaign.folderCount) || 3)));
-    if (pt && pt.id) await ensureDirs(uid, projectId, campaignId, folderCount, pt.id);
-    const dirs = campaignDirs(uid, projectId, campaignId, folderCount, pt ? pt.id : undefined);
+    if (pt && pt.id) await ensureDirs(effectiveUid, projectId, campaignId, folderCount, pt.id);
+    const dirs = campaignDirs(effectiveUid, projectId, campaignId, folderCount, pt ? pt.id : undefined);
     const result = {};
     const listFn = isVideo ? listVideos : listImages;
     const ptIdForPath = pt ? String(pt.id) : postTypeId;
@@ -2666,8 +2783,8 @@ api.get('/projects/:projectId/campaigns/:campaignId/folders', async (req, res) =
       const files = await listFn(dirs[i]);
       if (isVideo) {
         if (pt.mediaType === 'video') {
-          await cleanupPostedVideosOlderThan7Days(uid, projectId, campaignId, ptIdForPath, folderNum);
-          const posted = await readVideoPosted(uid, projectId, campaignId, ptIdForPath, folderNum);
+          await cleanupPostedVideosOlderThan7Days(effectiveUid, projectId, campaignId, ptIdForPath, folderNum);
+          const posted = await readVideoPosted(effectiveUid, projectId, campaignId, ptIdForPath, folderNum);
           const now = Date.now();
           result[`folder${folderNum}`] = files.map((f) => {
             const name = (f && f.filename) ? f.filename : path.basename(f && f.path ? f.path : f);
@@ -2678,14 +2795,14 @@ api.get('/projects/:projectId/campaigns/:campaignId/folders', async (req, res) =
             return { filename: name, usageCount: 0, postedAt, daysLeft };
           });
         } else {
-          const usage = await readVideoUsage(uid, projectId, campaignId, ptIdForPath, folderNum);
+          const usage = await readVideoUsage(effectiveUid, projectId, campaignId, ptIdForPath, folderNum);
           result[`folder${folderNum}`] = files.map((f) => {
             const name = (f && f.filename) ? f.filename : path.basename(f && f.path ? f.path : f);
             return { filename: name, usageCount: usage[name] || 0 };
           });
         }
       } else {
-        const usage = await readImageUsage(uid, projectId, campaignId, ptIdForPath, i + 1);
+        const usage = await readImageUsage(effectiveUid, projectId, campaignId, ptIdForPath, i + 1);
         result[`folder${i + 1}`] = files.map((f) => {
           const name = (f && f.filename) ? f.filename : path.basename(f && f.path ? f.path : f);
           return { filename: name, usageCount: usage[name] || 0 };
@@ -2705,7 +2822,8 @@ api.post('/projects/:projectId/campaigns/:campaignId/folders', async (req, res) 
     const campaignId = parseInt(req.params.campaignId, 10);
     const projectId = parseInt(req.params.projectId, 10);
     const postTypeId = req.body.postTypeId || req.query.postTypeId || 'default';
-    const campaign = getCampaignById(campaignId, uid);
+    const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+    const campaign = getCampaignById(campaignId, effectiveUid);
     if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
     const pt = getPostType(campaign, postTypeId, projectId);
     if (!pt) return res.status(404).json({ error: 'Post type not found' });
@@ -2724,8 +2842,8 @@ api.post('/projects/:projectId/campaigns/:campaignId/folders', async (req, res) 
     else pagePts.push(updatedPt);
     pagePostTypes[projectId] = pagePts;
     const updated = { ...campaign, pagePostTypes };
-    saveCampaign(updated, uid);
-    await ensureDirs(uid, String(projectId), String(campaignId), newCount, pt.id);
+    saveCampaign(updated, effectiveUid);
+    await ensureDirs(effectiveUid, String(projectId), String(campaignId), newCount, pt.id);
     res.json(ensurePostTypes(updated, projectId));
   } catch (e) {
     res.status(500).json({ error: String(e.message) });
@@ -2740,7 +2858,8 @@ api.delete('/projects/:projectId/campaigns/:campaignId/folders/:folderNum', asyn
     const projectId = parseInt(req.params.projectId, 10);
     const folderNum = parseInt(req.params.folderNum, 10);
     const postTypeId = req.query.postTypeId || req.body?.postTypeId || 'default';
-    const campaign = getCampaignById(campaignId, uid);
+    const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+    const campaign = getCampaignById(campaignId, effectiveUid);
     if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
     const pt = getPostType(campaign, postTypeId, projectId);
     if (!pt) return res.status(404).json({ error: 'Post type not found' });
@@ -2750,7 +2869,7 @@ api.delete('/projects/:projectId/campaigns/:campaignId/folders/:folderNum', asyn
     if (folderNum < 1 || folderNum > currentCount || currentCount <= 1) return res.status(400).json({ error: 'Invalid folder or cannot delete last folder' });
     const newCount = currentCount - 1;
     const ptSuffix = pt.id && pt.id !== 'default' ? `pt_${pt.id}` : '';
-    const uidSeg = String(uid).replace(/[/\\]/g, '_');
+    const uidSeg = String(effectiveUid).replace(/[/\\]/g, '_');
     {
       const base = ptSuffix ? path.join(UPLOADS, uidSeg, String(projectId), String(campaignId), ptSuffix) : path.join(UPLOADS, uidSeg, String(projectId), String(campaignId));
       if (folderNum === currentCount) {
@@ -2789,7 +2908,7 @@ api.delete('/projects/:projectId/campaigns/:campaignId/folders/:folderNum', asyn
     if (ptIdx >= 0) pagePts[ptIdx] = updatedPt;
     pagePostTypes[projectId] = pagePts;
     const updated = { ...campaign, pagePostTypes };
-    saveCampaign(updated, uid);
+    saveCampaign(updated, effectiveUid);
     res.json(ensurePostTypes(updated, projectId));
   } catch (e) {
     res.status(500).json({ error: String(e.message) });
@@ -2829,7 +2948,8 @@ api.delete('/projects/:projectId/campaigns/:campaignId/folders/:folderNum/images
     const postTypeId = req.query.postTypeId || 'default';
     const filename = req.params.filename;
     if (!filename || /[\/\\]/.test(filename)) return res.status(400).json({ error: 'Invalid filename' });
-    await deleteFolderFile(uid, projectId, campaignId, folderNum, filename, postTypeId);
+    const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+    await deleteFolderFile(effectiveUid, projectId, campaignId, folderNum, filename, postTypeId);
     res.json({ ok: true });
   } catch (e) {
     if (e.code === 'ENOENT') return res.status(404).json({ error: 'File not found' });
@@ -2847,7 +2967,8 @@ api.delete('/projects/:projectId/campaigns/:campaignId/folders/:folderNum/media/
     const postTypeId = req.query.postTypeId || 'default';
     const filename = req.params.filename;
     if (!filename || /[\/\\]/.test(filename)) return res.status(400).json({ error: 'Invalid filename' });
-    await deleteFolderFile(uid, projectId, campaignId, folderNum, filename, postTypeId);
+    const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+    await deleteFolderFile(effectiveUid, projectId, campaignId, folderNum, filename, postTypeId);
     res.json({ ok: true });
   } catch (e) {
     if (e.code === 'ENOENT') return res.status(404).json({ error: 'File not found' });
@@ -2863,19 +2984,20 @@ api.delete('/projects/:projectId/campaigns/:campaignId/folders/:folderNum/clear'
     const campaignId = String(req.params.campaignId);
     const folderNum = Math.max(1, parseInt(req.params.folderNum, 10));
     const postTypeId = req.query.postTypeId || 'default';
-    const campaign = getCampaignById(campaignId, uid);
+    const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+    const campaign = getCampaignById(campaignId, effectiveUid);
     if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
     const pt = getPostType(campaign, postTypeId, projectId);
     if (!pt) return res.status(404).json({ error: 'Post type not found' });
     const folderCount = pt.mediaType === 'video' ? 2 : (pt.mediaType === 'video_text' ? 1 : Math.max(1, pt.folderCount || 3));
-    const dirs = campaignDirs(uid, projectId, campaignId, folderCount, pt.id);
+    const dirs = campaignDirs(effectiveUid, projectId, campaignId, folderCount, pt.id);
     const dir = dirs[folderNum - 1];
     if (!dir) return res.status(400).json({ error: 'Invalid folder' });
     const isVideo = pt.mediaType === 'video' || pt.mediaType === 'video_text';
     const files = isVideo ? await listVideos(dir) : await listImages(dir);
     for (const file of files) {
       const name = file.filename || (file.path && path.basename(file.path));
-      if (name) await deleteFolderFile(uid, projectId, campaignId, folderNum, name, postTypeId).catch(() => {});
+      if (name) await deleteFolderFile(effectiveUid, projectId, campaignId, folderNum, name, postTypeId).catch(() => {});
     }
     res.json({ ok: true, deleted: files.length });
   } catch (e) {
@@ -3168,7 +3290,7 @@ api.get('/calendar', async (req, res) => {
   }
 });
 
-function validateUploadContext(req, res, next) {
+async function validateUploadContext(req, res, next) {
   req.setTimeout(5 * 60 * 1000);
   res.setTimeout(5 * 60 * 1000);
   const uid = requireUserId(req, res);
@@ -3176,7 +3298,8 @@ function validateUploadContext(req, res, next) {
   const projectId = String(req.params.projectId || req.query.projectId || '');
   const campaignId = String(req.params.campaignId || req.query.campaignId || '');
   if (!projectId || !campaignId) return res.status(400).json({ error: 'Missing project or campaign' });
-  const campaign = getCampaignById(campaignId, uid);
+  const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+  const campaign = getCampaignById(campaignId, effectiveUid);
   if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
   const postTypeId = (req.query.postTypeId != null && req.query.postTypeId !== '') ? String(req.query.postTypeId) : 'default';
   const pt = getPostType(campaign, postTypeId, projectId);
@@ -3188,7 +3311,7 @@ function validateUploadContext(req, res, next) {
   const isVideoQuery = req.query.mediaType === 'video' || req.query.mediaType === 'video_text';
   const isVideoPt = pt && (pt.mediaType === 'video' || pt.mediaType === 'video_text');
   req.uploadContext = {
-    uid,
+    uid: effectiveUid,
     projectId,
     campaignId,
     ptId: String(pt.id),
@@ -3250,7 +3373,8 @@ api.post('/projects/:projectId/campaigns/:campaignId/preview', async (req, res) 
     const projectId = String(req.params.projectId);
     const campaignId = String(req.params.campaignId);
     const postTypeId = req.body.postTypeId || 'default';
-    const campaign = getCampaignById(campaignId, uid);
+    const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+    const campaign = getCampaignById(campaignId, effectiveUid);
     if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
     const pt = getPostType(campaign, postTypeId, projectId);
     if (!pt) return res.status(404).json({ error: 'Post type not found' });
@@ -3258,7 +3382,7 @@ api.post('/projects/:projectId/campaigns/:campaignId/preview', async (req, res) 
       try {
         const textStyleOverride = Array.isArray(req.body.textStylePerFolder) ? req.body.textStylePerFolder : null;
         const textOptionsOverride = Array.isArray(req.body.textOptionsPerFolder) ? req.body.textOptionsPerFolder : null;
-        const result = await runCampaignPipelineVideoWithText(uid, projectId, campaignId, textStyleOverride, textOptionsOverride, postTypeId, { preview: true });
+        const result = await runCampaignPipelineVideoWithText(effectiveUid, projectId, campaignId, textStyleOverride, textOptionsOverride, postTypeId, { preview: true });
         const url = result.webContentUrls && result.webContentUrls[0] ? result.webContentUrls[0] : null;
         return res.json({ url: url || '', base64: null });
       } catch (e) {
@@ -3279,16 +3403,16 @@ api.post('/projects/:projectId/campaigns/:campaignId/preview', async (req, res) 
     const opts = Array.isArray(optsFromBody) && optsFromBody.length ? optsFromBody : (Array.isArray(optsFromPt) ? optsFromPt : []);
     const sampleText = await pickLeastUsedTextOptionAndIncrement(projectId, campaignId, postTypeId, folderNum - 1, opts);
     const folderCount = Math.max(1, pt.folderCount || 3);
-    const dirs = campaignDirs(uid, projectId, campaignId, folderCount, pt.id);
+    const dirs = campaignDirs(effectiveUid, projectId, campaignId, folderCount, pt.id);
     const dir = dirs[folderNum - 1];
     if (!dir) return res.status(404).json({ error: 'Folder not found' });
     const images = await listImages(dir);
     const chosen = images[0] || null;
     if (!chosen) return res.status(400).json({ error: 'No images in folder. Add photos to preview.' });
-    const imgBuf = await getImageBuffer(chosen, folderNum - 1, dirs, projectId, campaignId, postTypeId, uid);
+    const imgBuf = await getImageBuffer(chosen, folderNum - 1, dirs, projectId, campaignId, postTypeId, effectiveUid);
     const uniqueId = Date.now();
     const outName = `preview-${folderNum}-${uniqueId}.jpg`;
-    const uidSeg = String(uid).replace(/[/\\]/g, '_');
+    const uidSeg = String(effectiveUid).replace(/[/\\]/g, '_');
     const outPath = storage.useSupabase() ? null : path.join(GENERATED, uidSeg, projectId, campaignId, outName);
     if (!storage.useSupabase()) await fs.mkdir(path.join(GENERATED, uidSeg, projectId, campaignId), { recursive: true });
     const normStyle = {
@@ -3303,7 +3427,7 @@ api.post('/projects/:projectId/campaigns/:campaignId/preview', async (req, res) 
     const baseUrl = getBaseUrlForGenerated(req);
     let url;
     if (storage.useSupabase()) {
-      await storage.uploadGenerated(projectId, campaignId, outName, imageBuffer, undefined, uid);
+      await storage.uploadGenerated(projectId, campaignId, outName, imageBuffer, undefined, effectiveUid);
       url = `${baseUrl}/generated/${uidSeg}/${projectId}/${campaignId}/${outName}`;
     } else {
       url = `${baseUrl}/generated/${uidSeg}/${projectId}/${campaignId}/${outName}`;
@@ -3321,7 +3445,8 @@ api.post('/projects/:projectId/campaigns/:campaignId/run', async (req, res) => {
     const projectId = req.params.projectId;
     const campaignId = req.params.campaignId;
     const postTypeId = req.body?.postTypeId || 'default';
-    const campaign = getCampaignById(campaignId, uid);
+    const effectiveUid = await resolveEffectiveUserId(campaignId, uid);
+    const campaign = getCampaignById(campaignId, effectiveUid);
     if (!campaign || !campaignBelongsToPage(campaign, projectId)) return res.status(404).json({ error: 'Campaign not found' });
     const todayStr = new Date().toISOString().slice(0, 10);
     if (campaign.campaignStartDate && todayStr < campaign.campaignStartDate) {
@@ -3343,16 +3468,17 @@ api.post('/projects/:projectId/campaigns/:campaignId/run', async (req, res) => {
     const textOptionsOverride = Array.isArray(req.body?.textOptionsPerFolder) ? req.body.textOptionsPerFolder : null;
     const sendAsDraft = req.body?.sendAsDraft === true;
     const addMusicRequested = req.body?.addMusicToCarousel === true;
-    const config = getConfig();
-    const project = getProjects(uid).find((p) => String(p.id) === String(projectId));
+    // Use the campaign owner's settings for Blotato (shared members post on behalf of owner)
+    const ownerSettings = await getUserSettings(effectiveUid);
+    const project = getProjects(effectiveUid).find((p) => String(p.id) === String(projectId));
     const accountId = project?.blotatoAccountId;
-    const apiKey = config?.blotatoApiKey;
+    const apiKey = ownerSettings.blotatoApiKey;
     const isPhotoPostType = pt && pt.mediaType === 'photo';
     const addMusicToCarousel = isPhotoPostType && addMusicRequested;
 
     if (process.env.ENCODING_MODE === 'worker' && pt && (pt.mediaType === 'video' || pt.mediaType === 'video_text')) {
       try {
-        const payload = await buildEncodingJobPayload(uid, projectId, campaignId, postTypeId, {
+        const payload = await buildEncodingJobPayload(effectiveUid, projectId, campaignId, postTypeId, {
           sendToBlotato: !!(apiKey && accountId),
           draft: sendAsDraft,
           scheduledAt: null,
@@ -3368,7 +3494,7 @@ api.post('/projects/:projectId/campaigns/:campaignId/run', async (req, res) => {
       }
     }
 
-    const result = await runCampaignPipeline(uid, projectId, campaignId, textStyleOverride, textOptionsOverride, postTypeId);
+    const result = await runCampaignPipeline(effectiveUid, projectId, campaignId, textStyleOverride, textOptionsOverride, postTypeId);
     let runStatus = null;
     if (apiKey && accountId && result.webContentUrls?.length) {
       try {
@@ -3464,10 +3590,10 @@ api.post('/encoding/jobs/:id/complete', requireEncodingWorker, async (req, res) 
         JSON.stringify({ campaignId: campaignIdStr, runId: runData.runId, webContentUrls: runData.webContentUrls, at: runData.at }, null, 2)
       );
       if (userId && projectId) {
-        const config = getConfig();
+        const ownerSettings = await getUserSettings(userId);
         const project = getProjects(userId).find((p) => String(p.id) === String(projectId));
         const accountId = project?.blotatoAccountId;
-        const apiKey = config?.blotatoApiKey;
+        const apiKey = ownerSettings.blotatoApiKey;
         if (apiKey && accountId) {
           console.log(`[encoding] Sending to Blotato: accountId=${accountId} url=${url}`);
           try {
@@ -3891,10 +4017,10 @@ api.post('/trends/:trendId/run', async (req, res) => {
     const pageIds = trend.pageIds && trend.pageIds.length ? trend.pageIds : [];
     const firstProjectId = pageIds[0];
     if (firstProjectId && result.webContentUrls?.length) {
-      const config = getConfig();
+      const trendSettings = await getUserSettings(uid);
       const project = getProjects(uid).find((p) => String(p.id) === String(firstProjectId));
       const accountId = project?.blotatoAccountId;
-      const apiKey = config?.blotatoApiKey;
+      const apiKey = trendSettings.blotatoApiKey;
       if (apiKey && accountId) {
         try {
           await sendToBlotato(apiKey, accountId, result.webContentUrls, { isDraft: sendAsDraft, addMusicToCarousel });
@@ -3954,13 +4080,45 @@ api.get('/auth/config', (req, res) => {
 });
 
 // --- Profile lookup by username (for adding team members) ---
+// --- Profile endpoints ---
+api.get('/profiles/me', async (req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Supabase not configured' });
+  if (!req.user) return res.status(401).json({ error: 'Sign in required' });
+  try {
+    const { data, error } = await supabaseAdmin.from('profiles').select('id, username, full_name').eq('id', req.user.id).maybeSingle();
+    if (error) throw error;
+    res.json({ id: req.user.id, email: req.user.email, username: data?.username || '', full_name: data?.full_name || '' });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || 'Failed') });
+  }
+});
+
+api.put('/profiles/me', async (req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Supabase not configured' });
+  if (!req.user) return res.status(401).json({ error: 'Sign in required' });
+  const { username, full_name } = req.body || {};
+  const updates = {};
+  if (username !== undefined) updates.username = String(username).trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+  if (full_name !== undefined) updates.full_name = String(full_name).trim();
+  if (!Object.keys(updates).length) return res.status(400).json({ error: 'Nothing to update' });
+  updates.updated_at = new Date().toISOString();
+  try {
+    const { error } = await supabaseAdmin.from('profiles').update(updates).eq('id', req.user.id);
+    if (error) throw error;
+    const { data } = await supabaseAdmin.from('profiles').select('id, username, full_name').eq('id', req.user.id).maybeSingle();
+    res.json({ id: req.user.id, email: req.user.email, username: data?.username || '', full_name: data?.full_name || '' });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || 'Update failed') });
+  }
+});
+
 api.get('/profiles/lookup', async (req, res) => {
   if (!supabaseAdmin) return res.status(503).json({ error: 'Supabase not configured' });
   if (!req.user) return res.status(401).json({ error: 'Sign in required' });
   const username = (req.query.username || '').trim().toLowerCase();
   if (!username) return res.status(400).json({ error: 'username required' });
   try {
-    const { data, error } = await supabaseAdmin.from('profiles').select('id, username').ilike('username', username).maybeSingle();
+    const { data, error } = await supabaseAdmin.from('profiles').select('id, username, full_name').ilike('username', username).maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'User not found' });
     res.json(data);
@@ -4020,7 +4178,91 @@ api.delete('/team/:userId', async (req, res) => {
   }
 });
 
-// --- Config ---
+// --- Campaign members (campaign-level sharing) ---
+api.get('/campaigns/:campaignId/members', async (req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Supabase not configured' });
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const cid = parseInt(req.params.campaignId, 10);
+    const { data: rows, error } = await supabaseAdmin.from('campaign_members').select('member_id, role, created_at').eq('campaign_id', cid).eq('owner_id', uid);
+    if (error) throw error;
+    if (!rows || !rows.length) return res.json([]);
+    const memberIds = rows.map((r) => r.member_id);
+    const { data: profiles } = await supabaseAdmin.from('profiles').select('id, username, full_name').in('id', memberIds);
+    const byId = (profiles || []).reduce((m, p) => { m[p.id] = p; return m; }, {});
+    res.json(rows.map((r) => ({ id: r.member_id, username: byId[r.member_id]?.username || null, full_name: byId[r.member_id]?.full_name || '', role: r.role, added_at: r.created_at })));
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.post('/campaigns/:campaignId/members', async (req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Supabase not configured' });
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  const username = (req.body.username || '').trim();
+  if (!username) return res.status(400).json({ error: 'username required' });
+  try {
+    const cid = parseInt(req.params.campaignId, 10);
+    // Verify requester owns this campaign
+    const campaign = getCampaignById(cid, uid);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found or you do not own it' });
+    const { data: profile } = await supabaseAdmin.from('profiles').select('id, username, full_name').ilike('username', username).maybeSingle();
+    if (!profile) return res.status(404).json({ error: 'User not found' });
+    if (profile.id === uid) return res.status(400).json({ error: 'Cannot add yourself' });
+    const { error } = await supabaseAdmin.from('campaign_members').insert({ owner_id: uid, campaign_id: cid, member_id: profile.id });
+    if (error) {
+      if (error.code === '23505') return res.status(409).json({ error: 'Already a member' });
+      throw error;
+    }
+    res.status(201).json({ id: profile.id, username: profile.username, full_name: profile.full_name || '', role: 'editor' });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.delete('/campaigns/:campaignId/members/:memberId', async (req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Supabase not configured' });
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const cid = parseInt(req.params.campaignId, 10);
+    const { error } = await supabaseAdmin.from('campaign_members').delete().eq('campaign_id', cid).eq('owner_id', uid).eq('member_id', req.params.memberId);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+// --- Per-user settings (replaces global config for blotato key) ---
+api.get('/settings', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const settings = await getUserSettings(uid);
+    res.json(settings);
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+api.put('/settings', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const { blotatoApiKey, timezone } = req.body || {};
+    const current = await getUserSettings(uid);
+    const updated = { blotatoApiKey: blotatoApiKey !== undefined ? String(blotatoApiKey) : current.blotatoApiKey, timezone: timezone !== undefined ? String(timezone) : current.timezone };
+    await saveUserSettings(uid, updated);
+    res.json(updated);
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+// --- Config (kept for backwards compat — baseUrl only) ---
 api.get('/config', (req, res) => res.json({ ...getConfig(), timezone: process.env.TZ || 'America/New_York' }));
 api.put('/config', (req, res) => {
   const body = { ...req.body };
@@ -4030,26 +4272,18 @@ api.put('/config', (req, res) => {
 });
 
 // --- Logins (page credentials: email, username, password, platform) ---
-function getLoginsData() {
-  return readJson(LOGINS_PATH, { nextId: 1, items: [] });
-}
-function getLogins() {
-  return (getLoginsData().items || []).slice();
-}
-function saveLogins(items, nextId) {
-  const data = getLoginsData();
-  writeJson(LOGINS_PATH, { nextId: nextId !== undefined ? nextId : data.nextId, items: items || data.items || [] });
-}
 api.get('/logins', (req, res) => {
+  const uid = req.user?.id || null;
   try {
-    res.json(getLogins());
+    res.json(getLoginsForUser(uid));
   } catch (e) {
     res.status(500).json({ error: String(e.message) });
   }
 });
 api.post('/logins', (req, res) => {
+  const uid = req.user?.id || null;
   try {
-    const data = getLoginsData();
+    const data = getLoginsDataForUser(uid);
     const nextId = (data.nextId || 1);
     const { email = '', username = '', password = '', platform = 'TikTok' } = req.body || {};
     const validPlatforms = ['TikTok', 'Instagram', 'YouTube'];
@@ -4061,16 +4295,17 @@ api.post('/logins', (req, res) => {
       platform: validPlatforms.includes(platform) ? platform : 'TikTok',
     };
     const items = [...(data.items || []), item];
-    saveLogins(items, nextId + 1);
+    saveLoginsForUser(uid, items, nextId + 1);
     res.status(201).json(item);
   } catch (e) {
     res.status(500).json({ error: String(e.message) });
   }
 });
 api.put('/logins/:id', (req, res) => {
+  const uid = req.user?.id || null;
   try {
     const id = parseInt(req.params.id, 10);
-    const data = getLoginsData();
+    const data = getLoginsDataForUser(uid);
     const items = (data.items || []).slice();
     const idx = items.findIndex((l) => l.id === id);
     if (idx < 0) return res.status(404).json({ error: 'Login not found' });
@@ -4080,19 +4315,20 @@ api.put('/logins/:id', (req, res) => {
     if (username !== undefined) items[idx].username = String(username).trim();
     if (password !== undefined) items[idx].password = String(password);
     if (platform !== undefined) items[idx].platform = validPlatforms.includes(platform) ? platform : items[idx].platform;
-    saveLogins(items);
+    saveLoginsForUser(uid, items);
     res.json(items[idx]);
   } catch (e) {
     res.status(500).json({ error: String(e.message) });
   }
 });
 api.delete('/logins/:id', (req, res) => {
+  const uid = req.user?.id || null;
   try {
     const id = parseInt(req.params.id, 10);
-    const data = getLoginsData();
+    const data = getLoginsDataForUser(uid);
     const items = (data.items || []).filter((l) => l.id !== id);
     if (items.length === (data.items || []).length) return res.status(404).json({ error: 'Login not found' });
-    saveLogins(items);
+    saveLoginsForUser(uid, items);
     const avatarPath = path.join(LOGIN_AVATARS_DIR, `${id}.jpg`);
     if (fsSync.existsSync(avatarPath)) fsSync.unlinkSync(avatarPath);
     res.status(204).end();
@@ -4120,7 +4356,7 @@ api.post('/logins/:id/avatar', (req, res, next) => {
     if (!req.file) return res.status(400).json({ error: 'No file received. Use the "avatar" field.' });
     try {
       const id = String(req.params.id);
-      const login = (getLogins() || []).find((l) => String(l.id) === id);
+      const login = (getLoginsForUser(req.user?.id || null) || []).find((l) => String(l.id) === id);
       if (!login) return res.status(404).json({ error: 'Login not found' });
       const srcPath = req.file.path;
       const destPath = path.join(LOGIN_AVATARS_DIR, `${id}.jpg`);
@@ -4314,7 +4550,6 @@ cron.schedule('* * * * *', async () => {
   if (!runs.length) {
     return;
   }
-  const config = getConfig();
   const scheduledAtIso = getScheduleUtcIso(todayStr, currentTime, TZ);
   console.log(`[scheduler] ${currentTime} (${todayStr}): ${runs.length} run(s) to execute`);
   for (const { userId: uid, campaign: c, projectId, postTypeId } of runs) {
@@ -4322,7 +4557,8 @@ cron.schedule('* * * * *', async () => {
     const projects = getProjects(uid);
     const project = projects.find((p) => p.id === parseInt(String(projectId), 10));
     const accountId = project?.blotatoAccountId;
-    const apiKey = config?.blotatoApiKey;
+    const ownerSettings = await getUserSettings(uid);
+    const apiKey = ownerSettings.blotatoApiKey;
 
     if (process.env.ENCODING_MODE === 'worker' && pt && (pt.mediaType === 'video' || pt.mediaType === 'video_text')) {
       try {
