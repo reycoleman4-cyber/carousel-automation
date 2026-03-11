@@ -7,7 +7,8 @@
     "start": "node server.js",
     "dev": "node --env-file=.env.local --watch server.js",
     "worker": "node worker.js",
-    "deploy": "railway up"
+    "deploy": "railway up",
+    "sync": "node scripts/sync-from-prod.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.97.0",

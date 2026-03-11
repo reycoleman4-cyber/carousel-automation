@@ -3400,6 +3400,21 @@ api.post('/projects/:projectId/campaigns/:campaignId/run', async (req, res) => {
   }
 });
 
+// --- Local dev data sync ---
+api.get('/admin/export-data', requireEncodingWorker, (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const projectsPath = getProjectsPath(userId);
+    const campaignsPath = getCampaignsPath(userId);
+    const projects = projectsPath ? readJson(projectsPath, []) : [];
+    const campaigns = campaignsPath ? readJson(campaignsPath, []) : [];
+    res.json({ projects, campaigns });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
 // --- Encoding queue API (for VPS worker when ENCODING_MODE=worker) ---
 
 // Serve preset video files to the VPS worker
