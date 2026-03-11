@@ -169,7 +169,6 @@ async function overlayPresetOnVideo(sourcePath, presetPath, outputPath) {
   ].join(';');
   return new Promise((resolve, reject) => {
     ffmpeg(sourcePath)
-      .inputOptions(['-stream_loop', '-1'])
       .input(presetPath)
       .outputOptions([
         '-filter_complex', filterComplex,
@@ -178,6 +177,7 @@ async function overlayPresetOnVideo(sourcePath, presetPath, outputPath) {
         '-c:v', 'libx264',
         '-c:a', 'copy',
         '-t', '60',
+        '-shortest',
         ...FFMPEG_LOW_MEM_OPTS,
       ])
       .output(outputPath)
