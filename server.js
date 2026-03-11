@@ -3454,9 +3454,10 @@ api.post('/encoding/jobs/:id/complete', requireEncodingWorker, async (req, res) 
         const accountId = project?.blotatoAccountId;
         const apiKey = config?.blotatoApiKey;
         if (apiKey && accountId) {
+          console.log(`[encoding] Sending to Blotato: accountId=${accountId} url=${url}`);
           try {
-            await sendToBlotato(apiKey, accountId, [url], { isDraft: draft, addMusicToCarousel: false });
-            console.log(`[encoding] Blotato post sent for campaign ${campaignId} page ${projectId}`);
+            const blotatoRes = await sendToBlotato(apiKey, accountId, [url], { isDraft: draft, addMusicToCarousel: false });
+            console.log(`[encoding] Blotato post sent for campaign ${campaignId} page ${projectId} | response:`, JSON.stringify(blotatoRes));
           } catch (blotatoErr) {
             console.error(`[encoding] Blotato failed:`, blotatoErr.message);
             if (scheduledAt) {
