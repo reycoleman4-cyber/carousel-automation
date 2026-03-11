@@ -1133,12 +1133,15 @@ async function runCampaignPipelineVideo(userId, projectId, campaignId, postTypeI
       const outPath = path.join(outDir, outName);
       await overlayPresetOnVideo(basePath, presetPath, outPath, {});
       const uidSeg = String(userId).replace(/[/\\]/g, '_');
+      let videoUrl;
       if (storage.useSupabase()) {
         const outBuf = await fs.readFile(outPath);
         await storage.uploadGenerated(projectIdStr, campaignIdStr, outName, outBuf, 'video/mp4', userId);
         await fs.unlink(outPath).catch(() => {});
+        videoUrl = storage.getGeneratedUrl(projectIdStr, campaignIdStr, outName, userId);
+      } else {
+        videoUrl = `${baseUrl}/generated/${uidSeg}/${projectIdStr}/${campaignIdStr}/${outName}`;
       }
-      const videoUrl = `${baseUrl}/generated/${uidSeg}/${projectIdStr}/${campaignIdStr}/${outName}`;
       const runData = {
         campaignId: campaignIdStr,
         runId,
@@ -1167,14 +1170,16 @@ async function runCampaignPipelineVideo(userId, projectId, campaignId, postTypeI
     const folderPath = folders[folderNum - 1];
     videoBuffer = await fs.readFile(path.join(folderPath, filename));
   }
+  let videoUrl;
   if (storage.useSupabase()) {
     await storage.uploadGenerated(projectIdStr, campaignIdStr, outName, videoBuffer, 'video/mp4', userId);
+    videoUrl = storage.getGeneratedUrl(projectIdStr, campaignIdStr, outName, userId);
   } else {
     const outDir = generatedDir(userId, projectIdStr, campaignIdStr);
     await fs.mkdir(outDir, { recursive: true }).catch(() => {});
     await fs.writeFile(path.join(outDir, outName), videoBuffer);
+    videoUrl = `${baseUrl}/generated/${uidSeg}/${projectIdStr}/${campaignIdStr}/${outName}`;
   }
-  const videoUrl = `${baseUrl}/generated/${uidSeg}/${projectIdStr}/${campaignIdStr}/${outName}`;
   const runData = {
     campaignId: campaignIdStr,
     runId,
@@ -1456,7 +1461,7 @@ async function runCampaignPipelineVideoWithText(userId, projectId, campaignId, t
       const outBuf = await fs.readFile(outPath);
       await storage.uploadGenerated(projectIdStr, campaignIdStr, outName, outBuf, 'video/mp4', userId);
       await fs.unlink(outPath).catch(() => {});
-      url = `${baseUrl}/generated/${uidSeg}/${projectIdStr}/${campaignIdStr}/${outName}`;
+      url = storage.getGeneratedUrl(projectIdStr, campaignIdStr, outName, userId);
     } else {
       url = `${baseUrl}/generated/${uidSeg}/${projectIdStr}/${campaignIdStr}/${outName}`;
     }
@@ -1530,7 +1535,7 @@ async function runCampaignPipeline(userId, projectId, campaignId, textStyleOverr
     const uidSeg = String(userId).replace(/[/\\]/g, '_');
     if (storage.useSupabase()) {
       await storage.uploadGenerated(projectIdStr, campaignIdStr, outName, buf, undefined, userId);
-      webContentUrls.push(`${baseUrl}/generated/${uidSeg}/${projectIdStr}/${campaignIdStr}/${outName}`);
+      webContentUrls.push(storage.getGeneratedUrl(projectIdStr, campaignIdStr, outName, userId));
     } else {
       webContentUrls.push(`${baseUrl}/generated/${uidSeg}/${projectIdStr}/${campaignIdStr}/${outName}`);
     }
@@ -4330,6 +4335,14 @@ try {
       console.log('[storage] Using Supabase Storage');
     } catch (e) {
       console.warn('[storage] Supabase init failed:', e.message);
+    }
+    // Clear local generated dir on startup — all generated files go to Supabase now
+    try {
+      await fs.rm(GENERATED, { recursive: true, force: true });
+      await fs.mkdir(GENERATED, { recursive: true });
+      console.log('[storage] Cleared local generated cache (using Supabase)');
+    } catch (e) {
+      console.warn('[storage] Could not clear generated dir:', e.message);
     }
   }
   const server = app.listen(PORT, '0.0.0.0', () => {
