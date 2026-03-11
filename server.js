@@ -622,6 +622,14 @@ function resolvePresetPath(userId, presetId) {
   return getPresetFilePath(userId, presetId);
 }
 
+/** Pick a preset ID for this run: randomly select from pt.textPresetIds array, or fall back to legacy pt.textPresetId. */
+function getEffectivePresetId(pt) {
+  if (Array.isArray(pt.textPresetIds) && pt.textPresetIds.length > 0) {
+    return pt.textPresetIds[Math.floor(Math.random() * pt.textPresetIds.length)];
+  }
+  return pt.textPresetId || null;
+}
+
 function saveTextPreset(userId, preset) {
   if (!userId) return;
   ensureDataDir();
@@ -1138,17 +1146,18 @@ async function buildEncodingJobPayload(userId, projectId, campaignId, postTypeId
     if (!chosen) throw new Error('No unposted videos in Priority or Fallback folders. Add new videos or wait for posted ones to be removed after 7 days.');
     const filename = chosen.filename || path.basename(chosen.path || chosen);
     await markVideoPosted(userId, projectIdStr, campaignIdStr, pt.id, folderNum, filename);
-    const presetPath = pt.textPresetId ? resolvePresetPath(userId, pt.textPresetId) : null;
+    const effectivePresetId1 = getEffectivePresetId(pt);
+    const presetPath = effectivePresetId1 ? resolvePresetPath(userId, effectivePresetId1) : null;
     const hasPreset = presetPath && fsSync.existsSync(presetPath);
     const sourceUrl = storage.getFileUrl(projectIdStr, campaignIdStr, pt.id, folderNum, filename, userId);
     if (!sourceUrl) return null;
     const baseAppUrl = (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : process.env.BASE_URL || '').replace(/\/$/, '');
-    const presetUrl = hasPreset ? `${baseAppUrl}/api/encoding/preset-file?userId=${encodeURIComponent(userId)}&presetId=${encodeURIComponent(pt.textPresetId)}` : null;
+    const presetUrl = hasPreset ? `${baseAppUrl}/api/encoding/preset-file?userId=${encodeURIComponent(userId)}&presetId=${encodeURIComponent(effectivePresetId1)}` : null;
     return {
       type: hasPreset ? 'video_preset' : 'video',
       sourceUrl,
       presetUrl,
-      presetId: hasPreset ? pt.textPresetId : null,
+      presetId: hasPreset ? effectivePresetId1 : null,
       outputFilename,
       projectId: projectIdStr,
       campaignId: campaignIdStr,
@@ -1171,10 +1180,11 @@ async function buildEncodingJobPayload(userId, projectId, campaignId, postTypeId
     if (!chosen) throw new Error('No videos in folder. Upload videos first.');
     const filename = chosen.filename || path.basename(chosen.path || chosen);
     await incrementVideoUsage(userId, projectIdStr, campaignIdStr, pt.id, 1, filename);
-    const presetPath = pt.textPresetId ? resolvePresetPath(userId, pt.textPresetId) : null;
+    const effectivePresetId2 = getEffectivePresetId(pt);
+    const presetPath = effectivePresetId2 ? resolvePresetPath(userId, effectivePresetId2) : null;
     const hasPreset = presetPath && fsSync.existsSync(presetPath);
     const baseAppUrl2 = (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : process.env.BASE_URL || '').replace(/\/$/, '');
-    const presetUrl2 = hasPreset ? `${baseAppUrl2}/api/encoding/preset-file?userId=${encodeURIComponent(userId)}&presetId=${encodeURIComponent(pt.textPresetId)}` : null;
+    const presetUrl2 = hasPreset ? `${baseAppUrl2}/api/encoding/preset-file?userId=${encodeURIComponent(userId)}&presetId=${encodeURIComponent(effectivePresetId2)}` : null;
     const sourceUrl = storage.getFileUrl(projectIdStr, campaignIdStr, pt.id, 1, filename, userId);
     if (!sourceUrl) return null;
     if (hasPreset) {
@@ -1182,7 +1192,7 @@ async function buildEncodingJobPayload(userId, projectId, campaignId, postTypeId
         type: 'video_preset',
         sourceUrl,
         presetUrl: presetUrl2,
-        presetId: pt.textPresetId,
+        presetId: effectivePresetId2,
         outputFilename,
         projectId: projectIdStr,
         campaignId: campaignIdStr,
@@ -1251,7 +1261,8 @@ async function runCampaignPipelineVideo(userId, projectId, campaignId, postTypeI
   if (!chosen) throw new Error('No unposted videos in Priority or Fallback folders. Add new videos or wait for posted ones to be removed after 7 days.');
   const filename = chosen.filename || path.basename(chosen.path || chosen);
   await markVideoPosted(userId, projectIdStr, campaignIdStr, pt.id, folderNum, filename);
-  const presetPath = pt.textPresetId ? resolvePresetPath(userId, pt.textPresetId) : null;
+  const effectivePresetId3 = getEffectivePresetId(pt);
+  const presetPath = effectivePresetId3 ? resolvePresetPath(userId, effectivePresetId3) : null;
   const runId = Date.now();
   if (presetPath && fsSync.existsSync(presetPath)) {
     let basePath;
@@ -1558,7 +1569,8 @@ async function runCampaignPipelineVideoWithText(userId, projectId, campaignId, t
   if (!chosen) throw new Error('No videos in folder. Upload videos first.');
   const filename = chosen.filename || path.basename(chosen.path || chosen);
   await incrementVideoUsage(userId, projectIdStr, campaignIdStr, pt.id, 1, filename);
-  const presetPath = pt.textPresetId ? resolvePresetPath(userId, pt.textPresetId) : null;
+  const effectivePresetId4 = getEffectivePresetId(pt);
+  const presetPath = effectivePresetId4 ? resolvePresetPath(userId, effectivePresetId4) : null;
   const usePresetOnly = presetPath && fsSync.existsSync(presetPath);
   let inputPath;
   try {
@@ -1747,6 +1759,9 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
         isYourBrand: opts.isYourBrand ?? false,
         isAiGenerated: opts.isAiGenerated ?? false,
         isDraft: opts.isDraft ?? false,
+        ...(opts.title ? { title: String(opts.title).slice(0, 90) } : {}),
+        ...(opts.imageCoverIndex != null ? { imageCoverIndex: opts.imageCoverIndex } : {}),
+        ...(opts.videoCoverTimestamp != null ? { videoCoverTimestamp: opts.videoCoverTimestamp } : {}),
       },
     },
   };
@@ -2446,7 +2461,18 @@ api.put('/projects/:projectId/campaigns/:campaignId/postTypes/:postTypeId', asyn
   const textPresetId = req.body.textPresetId !== undefined
     ? (req.body.textPresetId == null || req.body.textPresetId === '' ? null : String(req.body.textPresetId))
     : pt.textPresetId;
-  let updatedPt = { ...pt, name, mediaType, textPresetId: textPresetId || undefined };
+  const textPresetIds = req.body.textPresetIds !== undefined
+    ? (Array.isArray(req.body.textPresetIds) ? req.body.textPresetIds.filter(Boolean).map(String) : null)
+    : pt.textPresetIds;
+  const title = req.body.title !== undefined
+    ? (req.body.title == null ? '' : String(req.body.title).slice(0, 90))
+    : (pt.title || '');
+  let updatedPt = {
+    ...pt, name, mediaType,
+    textPresetId: textPresetId || undefined,
+    textPresetIds: (Array.isArray(textPresetIds) && textPresetIds.length > 0) ? textPresetIds : undefined,
+    title: title || undefined,
+  };
   if (mediaType === 'video') {
     updatedPt = {
       ...updatedPt,
@@ -3498,7 +3524,7 @@ api.post('/projects/:projectId/campaigns/:campaignId/run', async (req, res) => {
     let runStatus = null;
     if (apiKey && accountId && result.webContentUrls?.length) {
       try {
-        await sendToBlotato(apiKey, accountId, result.webContentUrls, { isDraft: sendAsDraft, addMusicToCarousel });
+        await sendToBlotato(apiKey, accountId, result.webContentUrls, { isDraft: sendAsDraft, addMusicToCarousel, title: isPhotoPostType ? (pt?.title || undefined) : undefined });
         result.blotatoSent = true;
         result.blotatoSentAsDraft = sendAsDraft;
         runStatus = 'success';
@@ -4585,9 +4611,10 @@ cron.schedule('* * * * *', async () => {
       const result = await runCampaignPipeline(uid, projectId, c.id, null, null, postTypeId);
       console.log(`[scheduler] ${c.name} (page ${projectId}/${c.id} pt ${postTypeId}): ${result.webContentUrls.length} URLs`);
       const addMusicToCarousel = pt && pt.mediaType === 'photo' && !!c.addMusicToCarousel;
+      const isPhotoPostTypeCron = pt && pt.mediaType === 'photo';
       if (apiKey && accountId && result.webContentUrls?.length) {
         try {
-          await sendToBlotato(apiKey, accountId, result.webContentUrls, { isDraft: c.sendAsDraft, addMusicToCarousel });
+          await sendToBlotato(apiKey, accountId, result.webContentUrls, { isDraft: c.sendAsDraft, addMusicToCarousel, title: isPhotoPostTypeCron ? (pt?.title || undefined) : undefined });
           console.log(`[scheduler] Blotato post sent for ${c.name} page ${projectId}`);
           await appendRunOutcome(projectId, c.id, postTypeId, scheduledAtIso, 'success');
         } catch (blotatoErr) {

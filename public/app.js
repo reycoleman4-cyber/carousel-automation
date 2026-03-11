@@ -2137,7 +2137,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
   const count = list.length;
   const ts = (campaign.textStylePerFolder && campaign.textStylePerFolder[0]) || campaign.textStyle || {};
   const pt = (campaign.postTypes || []).find((p) => p.id === ptId);
-  const initialTextOverlayMode = (pt && pt.textPresetId) ? 'lyric' : 'onscreen';
+  const initialTextOverlayMode = (pt && ((Array.isArray(pt.textPresetIds) && pt.textPresetIds.length > 0) || pt.textPresetId)) ? 'lyric' : 'onscreen';
   const campaignAvatarSection = `<div class="campaign-header-avatar-inner" id="campaignHeaderAvatarInner"><img src="${campaignAvatarUrl(cid)}" alt="" class="campaign-avatar-img" id="campaignAvatarImg" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" id="campaignAvatarPlaceholder" style="display:none;">${(campaign.name || 'C').charAt(0).toUpperCase()}</span></div><input type="file" accept="image/*" id="campaignAvatarInput" hidden />`;
   const pageIndicator = project.hasAvatar ? `<img src="${projectAvatarUrl(project.id)}" alt="" class="page-indicator-avatar" />` : `<span class="page-indicator-initial">${(project.name || 'P').charAt(0).toUpperCase()}</span>`;
   const main = document.getElementById('main');
@@ -2186,13 +2186,9 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
         <button type="button" class="btn ${initialTextOverlayMode === 'onscreen' ? 'btn-primary' : 'btn-secondary'}" id="textOverlayModeOnscreen">On-screen text</button>
       </div>
       <div id="textOverlayLyricPanel" class="text-overlay-panel" style="display:${initialTextOverlayMode === 'lyric' ? 'block' : 'none'};">
-        <label class="field">
-          <span>Preset</span>
-          <select id="textPresetSelect" class="field-select" style="max-width:320px;">
-            <option value="">Select a preset…</option>
-          </select>
-        </label>
-        <p class="hint">Use a moving-text preset from Settings → Text presets, or choose "Randomly select preset" to pick one at random each run. The preview below shows the preset on your video.</p>
+        <p class="hint" style="margin-bottom:8px;">Select one or more presets from Settings → Text presets. One is randomly chosen each run. The preview below shows the selected preset on your video.</p>
+        <div id="textPresetCheckboxList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
+        <p id="textPresetNoPresetsHint" class="hint" style="display:none;">No presets found. Add them in Settings → Text presets.</p>
       </div>
       <div id="textOverlayOnscreenPanel" class="text-overlay-panel" style="display:${initialTextOverlayMode === 'onscreen' ? 'block' : 'none'};">
         <p class="hint">One line from your text options is chosen per run and overlaid using the styling below.</p>
@@ -2396,17 +2392,37 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
       });
   };
 
-  const presetSelect = document.getElementById('textPresetSelect');
-  if (presetSelect) {
+  const presetCheckboxList = document.getElementById('textPresetCheckboxList');
+  const presetNoPresetsHint = document.getElementById('textPresetNoPresetsHint');
+  function saveSelectedPresets() {
+    if (!presetCheckboxList) return;
+    const checkedIds = [...presetCheckboxList.querySelectorAll('.preset-checkbox:checked')].map((c) => c.value);
+    apiUpdatePostType(pid, cid, ptId, { textPresetIds: checkedIds, textPresetId: null })
+      .then((c) => { campaignData = c; })
+      .catch((err) => showAlert(err.message || 'Failed to update presets'));
+  }
+  if (presetCheckboxList) {
     apiTextPresets().then((presets) => {
-      presetSelect.innerHTML = '<option value="">Select a preset…</option><option value="random">Randomly select preset</option>' + (Array.isArray(presets) ? presets.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name || p.id)}</option>`).join('') : '');
-      const pt = (campaignData.postTypes || []).find((p) => p.id === ptId);
-      if (pt && pt.textPresetId) presetSelect.value = pt.textPresetId;
+      const currentPt = (campaignData.postTypes || []).find((p) => p.id === ptId);
+      const selectedIds = Array.isArray(currentPt?.textPresetIds) && currentPt.textPresetIds.length > 0
+        ? currentPt.textPresetIds.map(String)
+        : (currentPt?.textPresetId && currentPt.textPresetId !== 'random' ? [String(currentPt.textPresetId)] : []);
+      if (!Array.isArray(presets) || presets.length === 0) {
+        presetCheckboxList.innerHTML = '';
+        if (presetNoPresetsHint) presetNoPresetsHint.style.display = 'block';
+        return;
+      }
+      if (presetNoPresetsHint) presetNoPresetsHint.style.display = 'none';
+      presetCheckboxList.innerHTML = presets.map((p) => `
+        <label class="checkbox-field" style="margin-bottom:4px;">
+          <input type="checkbox" class="preset-checkbox" value="${escapeHtml(String(p.id))}" ${selectedIds.includes(String(p.id)) ? 'checked' : ''} />
+          <span>${escapeHtml(p.name || String(p.id))}</span>
+        </label>
+      `).join('');
+      presetCheckboxList.querySelectorAll('.preset-checkbox').forEach((cb) => {
+        cb.onchange = saveSelectedPresets;
+      });
     }).catch(() => {});
-    presetSelect.onchange = () => {
-      const val = presetSelect.value || null;
-      apiUpdatePostType(pid, cid, ptId, { textPresetId: val === '' ? null : val }).then((c) => { campaignData = c; }).catch((err) => showAlert(err.message || 'Failed to update preset'));
-    };
   }
 
   function setTextOverlayMode(mode) {
@@ -2434,8 +2450,8 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
     setTextOverlayMode('lyric');
   };
   document.getElementById('textOverlayModeOnscreen').onclick = () => {
-    apiUpdatePostType(pid, cid, ptId, { textPresetId: null }).then((c) => { campaignData = c; }).catch(() => {});
-    if (presetSelect) presetSelect.value = '';
+    apiUpdatePostType(pid, cid, ptId, { textPresetIds: [], textPresetId: null }).then((c) => { campaignData = c; }).catch(() => {});
+    if (presetCheckboxList) presetCheckboxList.querySelectorAll('.preset-checkbox').forEach((cb) => { cb.checked = false; });
     setTextOverlayMode('onscreen');
   };
 
@@ -2701,6 +2717,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
     const folders = foldersData.folders || {};
     const folderCount = Math.max(1, foldersData.folderCount || (campaign.folderCount || 3));
     const textOptionsPerFolder = campaign.textOptionsPerFolder || Array(folderCount).fill(null).map(() => []);
+    const photoPt = (campaign.postTypes || []).find((p) => p.id === ptId);
     setBreadcrumb({ view: 'campaign', projectId: pid, campaignId: cid }, project, campaign);
     const scheduleStart = campaign.scheduleStartDate || '';
     const scheduleEnd = campaign.scheduleEndDate || '';
@@ -2869,6 +2886,11 @@ function renderCampaign(projectId, campaignId, postTypeId) {
       <section class="card">
         <h2>Run now & webContentUrls</h2>
         <p class="hint">Run once to generate images and URLs. Send these URLs to Blotato/n8n.</p>
+        <label class="field" style="margin-bottom:8px;">
+          <span>Post title (optional, max 90 chars)</span>
+          <input type="text" id="postTitle" value="${escapeHtml(photoPt?.title || '')}" maxlength="90" placeholder="Leave blank for no title" style="max-width:420px;" />
+        </label>
+        <p class="hint" style="margin-top:-4px;margin-bottom:12px;">Title shown on TikTok carousel posts. No effect on videos.</p>
         <label class="checkbox-field" style="margin-bottom:12px;">
           <input type="checkbox" id="sendAsDraft" ${campaign.sendAsDraft ? 'checked' : ''} />
           <span>Send to Blotato as draft</span>
@@ -3240,6 +3262,14 @@ function renderCampaign(projectId, campaignId, postTypeId) {
           status.className = 'run-status error';
         });
     };
+
+    const postTitleInput = document.getElementById('postTitle');
+    if (postTitleInput) {
+      postTitleInput.onblur = () => {
+        const val = postTitleInput.value.trim().slice(0, 90);
+        apiUpdatePostType(pid, cid, ptId, { title: val }).then((c) => { campaign = c; }).catch(() => {});
+      };
+    }
 
     function showUrls(urls, base64Images = []) {
       const placeholder = document.getElementById('urlsPlaceholder');
