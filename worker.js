@@ -177,6 +177,7 @@ async function overlayPresetOnVideo(sourcePath, presetPath, outputPath) {
         '-map', '0:a?',
         '-c:v', 'libx264',
         '-c:a', 'copy',
+        '-t', '60',
         ...FFMPEG_LOW_MEM_OPTS,
       ])
       .output(outputPath)
