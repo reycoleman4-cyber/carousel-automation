@@ -3433,7 +3433,7 @@ api.post('/encoding/jobs/:id/complete', requireEncodingWorker, async (req, res) 
     const job = await getEncodingJob(id);
     if (!job || !job.payload) return res.json({ ok: true });
     const payload = job.payload;
-    const { userId, projectId, campaignId, postTypeId, sendToBlotato, draft, scheduledAt } = payload;
+    const { userId, projectId, campaignId, postTypeId, draft, scheduledAt } = payload;
     if (job.status === 'completed' && url && payload.runId != null) {
       const campaignIdStr = String(campaignId);
       const runData = {
