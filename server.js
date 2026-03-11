@@ -1033,12 +1033,15 @@ async function buildEncodingJobPayload(userId, projectId, campaignId, postTypeId
     const filename = chosen.filename || path.basename(chosen.path || chosen);
     await markVideoPosted(userId, projectIdStr, campaignIdStr, pt.id, folderNum, filename);
     const presetPath = pt.textPresetId ? resolvePresetPath(userId, pt.textPresetId) : null;
-    if (presetPath && fsSync.existsSync(presetPath)) return null;
+    const hasPreset = presetPath && fsSync.existsSync(presetPath);
     const sourceUrl = storage.getFileUrl(projectIdStr, campaignIdStr, pt.id, folderNum, filename, userId);
     if (!sourceUrl) return null;
+    const baseAppUrl = (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : process.env.BASE_URL || '').replace(/\/$/, '');
+    const presetUrl = hasPreset ? `${baseAppUrl}/api/encoding/preset-file?userId=${encodeURIComponent(userId)}&presetId=${encodeURIComponent(pt.textPresetId)}` : null;
     return {
-      type: 'video',
+      type: hasPreset ? 'video_preset' : 'video',
       sourceUrl,
+      presetUrl,
       outputFilename,
       projectId: projectIdStr,
       campaignId: campaignIdStr,
@@ -1062,13 +1065,31 @@ async function buildEncodingJobPayload(userId, projectId, campaignId, postTypeId
     const filename = chosen.filename || path.basename(chosen.path || chosen);
     await incrementVideoUsage(userId, projectIdStr, campaignIdStr, pt.id, 1, filename);
     const presetPath = pt.textPresetId ? resolvePresetPath(userId, pt.textPresetId) : null;
-    if (presetPath && fsSync.existsSync(presetPath)) return null;
+    const hasPreset = presetPath && fsSync.existsSync(presetPath);
+    const baseAppUrl2 = (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : process.env.BASE_URL || '').replace(/\/$/, '');
+    const presetUrl2 = hasPreset ? `${baseAppUrl2}/api/encoding/preset-file?userId=${encodeURIComponent(userId)}&presetId=${encodeURIComponent(pt.textPresetId)}` : null;
+    const sourceUrl = storage.getFileUrl(projectIdStr, campaignIdStr, pt.id, 1, filename, userId);
+    if (!sourceUrl) return null;
+    if (hasPreset) {
+      return {
+        type: 'video_preset',
+        sourceUrl,
+        presetUrl: presetUrl2,
+        outputFilename,
+        projectId: projectIdStr,
+        campaignId: campaignIdStr,
+        userId,
+        runId,
+        postTypeId: postTypeId || 'default',
+        sendToBlotato: !!options.sendToBlotato,
+        draft: !!options.draft,
+        scheduledAt: options.scheduledAt || null,
+      };
+    }
     const fromOverride = Array.isArray(options.textOptionsOverride) && options.textOptionsOverride.length && Array.isArray(options.textOptionsOverride[0]) ? options.textOptionsOverride[0] : null;
     const textOptions = fromOverride ?? (Array.isArray(pt.textOptionsPerFolder) && pt.textOptionsPerFolder.length > 0 ? pt.textOptionsPerFolder[0] : null) ?? (Array.isArray(campaign.textOptionsPerFolder) && campaign.textOptionsPerFolder.length > 0 ? campaign.textOptionsPerFolder[0] : null) ?? DEFAULT_TEXT_OPTIONS;
     const text = await pickLeastUsedTextOptionAndIncrement(projectIdStr, campaignIdStr, postTypeId || 'default', 0, textOptions);
     const textStyle = options.textStyleOverride && options.textStyleOverride[0] ? options.textStyleOverride[0] : (pt.textStylePerFolder && pt.textStylePerFolder[0]) || {};
-    const sourceUrl = storage.getFileUrl(projectIdStr, campaignIdStr, pt.id, 1, filename, userId);
-    if (!sourceUrl) return null;
     return {
       type: 'video_text',
       sourceUrl,
@@ -3378,6 +3399,20 @@ api.post('/projects/:projectId/campaigns/:campaignId/run', async (req, res) => {
 });
 
 // --- Encoding queue API (for VPS worker when ENCODING_MODE=worker) ---
+
+// Serve preset video files to the VPS worker
+api.get('/encoding/preset-file', requireEncodingWorker, async (req, res) => {
+  try {
+    const { userId, presetId } = req.query;
+    if (!userId || !presetId) return res.status(400).json({ error: 'Missing userId or presetId' });
+    const presetPath = resolvePresetPath(userId, presetId);
+    if (!presetPath || !fsSync.existsSync(presetPath)) return res.status(404).json({ error: 'Preset not found' });
+    res.sendFile(presetPath);
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
 api.get('/encoding/jobs/next', requireEncodingWorker, async (req, res) => {
   try {
     const job = await claimNextEncodingJob();

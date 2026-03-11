@@ -159,6 +159,33 @@ async function addVideoTextOverlay(inputPath, text, textStyle, outputPath) {
   }
 }
 
+async function overlayPresetOnVideo(sourcePath, presetPath, outputPath) {
+  const W = 1080;
+  const H = 1920;
+  const filterComplex = [
+    '[0:v]scale=' + W + ':' + H + ':force_original_aspect_ratio=increase,crop=' + W + ':' + H + '[base]',
+    '[1:v]scale=' + W + ':' + H + ':force_original_aspect_ratio=decrease,pad=' + W + ':' + H + ':(ow-iw)/2:(oh-ih)/2:color=black,colorkey=0x000000:0.08:0.15,format=rgba[ck]',
+    '[base][ck]overlay=0:0:format=auto:shortest=1[out]',
+  ].join(';');
+  return new Promise((resolve, reject) => {
+    ffmpeg(sourcePath)
+      .inputOptions(['-stream_loop', '-1'])
+      .input(presetPath)
+      .outputOptions([
+        '-filter_complex', filterComplex,
+        '-map', '[out]',
+        '-map', '0:a?',
+        '-c:v', 'libx264',
+        '-c:a', 'copy',
+        ...FFMPEG_LOW_MEM_OPTS,
+      ])
+      .output(outputPath)
+      .on('end', () => resolve())
+      .on('error', (err) => reject(new Error(err.message || 'Preset overlay failed')))
+      .run();
+  });
+}
+
 async function fetchNextJob() {
   const res = await fetch(`${BASE_URL}/api/encoding/jobs/next`, {
     headers: { Authorization: `Bearer ${SECRET}` },
@@ -196,6 +223,18 @@ async function processJob(job) {
     } else if (type === 'video_text') {
       await addVideoTextOverlay(tmpIn, payload.text, payload.textStyle || {}, tmpOut);
       outBuf = await fs.readFile(tmpOut);
+    } else if (type === 'video_preset') {
+      const presetExt = path.extname(payload.presetUrl.split('?')[0]) || '.mp4';
+      const tmpPreset = path.join(os.tmpdir(), `worker-preset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${presetExt}`);
+      try {
+        const presetRes = await fetch(payload.presetUrl, { headers: { Authorization: `Bearer ${SECRET}` } });
+        if (!presetRes.ok) throw new Error(`Preset download ${presetRes.status}`);
+        await fs.writeFile(tmpPreset, Buffer.from(await presetRes.arrayBuffer()));
+        await overlayPresetOnVideo(tmpIn, tmpPreset, tmpOut);
+        outBuf = await fs.readFile(tmpOut);
+      } finally {
+        await fs.unlink(tmpPreset).catch(() => {});
+      }
     } else {
       throw new Error('Unknown job type: ' + type);
     }
