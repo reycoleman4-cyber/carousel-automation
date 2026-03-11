@@ -223,10 +223,12 @@ async function processJob(job) {
       outBuf = buf;
     } else if (type === 'video_text') {
       await addVideoTextOverlay(tmpIn, payload.text, payload.textStyle || {}, tmpOut);
+      await compressToMax(tmpOut, SUPABASE_SAFE_BYTES);
       outBuf = await fs.readFile(tmpOut);
     } else if (type === 'video_preset') {
       const presetPath = await getPresetPath(payload.presetId || payload.presetUrl, payload.presetUrl);
       await overlayPresetOnVideo(tmpIn, presetPath, tmpOut);
+      await compressToMax(tmpOut, SUPABASE_SAFE_BYTES);
       outBuf = await fs.readFile(tmpOut);
     } else {
       throw new Error('Unknown job type: ' + type);
@@ -248,6 +250,31 @@ async function processJob(job) {
 
 const POLL_MS = 2000;
 const PRESET_CACHE_DIR = path.join(os.tmpdir(), 'carousel-presets');
+const SUPABASE_SAFE_BYTES = 48 * 1024 * 1024; // 48MB — Supabase limit is 50MB
+
+async function compressToMax(filePath, maxBytes) {
+  const { size } = await fs.stat(filePath);
+  if (size <= maxBytes) return;
+  console.log(`[worker] Output is ${(size / 1024 / 1024).toFixed(1)}MB, compressing to fit Supabase limit...`);
+  const targetFs = Math.floor(maxBytes * 0.92);
+  const tmpCompressed = filePath + '.compressed.mp4';
+  await new Promise((resolve, reject) => {
+    ffmpeg(filePath)
+      .outputOptions([
+        '-c:v', 'libx264', '-crf', '28', '-preset', 'superfast',
+        '-threads', '0',
+        '-fs', String(targetFs),
+        '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart',
+      ])
+      .output(tmpCompressed)
+      .on('end', () => resolve())
+      .on('error', (err) => reject(new Error(err.message || 'Compression failed')))
+      .run();
+  });
+  await fs.rename(tmpCompressed, filePath);
+  const { size: newSize } = await fs.stat(filePath);
+  console.log(`[worker] Compressed to ${(newSize / 1024 / 1024).toFixed(1)}MB`);
+}
 
 async function getPresetPath(presetId, presetUrl) {
   await fs.mkdir(PRESET_CACHE_DIR, { recursive: true });
