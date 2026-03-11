@@ -2018,8 +2018,13 @@ api.get('/projects', (req, res) => {
   }
 });
 
-api.get('/projects/:projectId/avatar', (req, res) => {
+api.get('/projects/:projectId/avatar', async (req, res) => {
   const id = String(req.params.projectId);
+  const uid = req.user?.id;
+  if (storage.useSupabase()) {
+    if (!uid) return res.status(401).end();
+    return res.redirect(storage.getAvatarUrl(uid, 'projects', id));
+  }
   const exts = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic'];
   for (const ext of exts) {
     const filePath = path.join(AVATARS_DIR, id + ext);
@@ -2031,7 +2036,7 @@ api.get('/projects/:projectId/avatar', (req, res) => {
 api.post('/projects/:projectId/avatar', (req, res, next) => {
   const uid = requireUserId(req, res);
   if (!uid) return;
-  avatarUpload.single('avatar')(req, res, (err) => {
+  avatarUpload.single('avatar')(req, res, async (err) => {
     if (err) {
       const msg = err.code === 'LIMIT_FILE_SIZE' ? 'File too large (max 10MB)' : (err.message || 'Upload failed');
       return res.status(400).json({ error: msg });
@@ -2041,14 +2046,21 @@ api.post('/projects/:projectId/avatar', (req, res, next) => {
       const projectId = String(req.params.projectId);
       const projects = getProjects(uid);
       if (!projects.find((p) => p.id === parseInt(projectId, 10))) return res.status(404).json({ error: 'Page not found' });
-      const keepFile = req.file.filename;
-      const exts = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic'];
-      exts.forEach((ext) => {
-        const fname = projectId + ext;
-        if (fname === keepFile) return;
-        const oldPath = path.join(AVATARS_DIR, fname);
-        if (fsSync.existsSync(oldPath)) try { fsSync.unlinkSync(oldPath); } catch (_) {}
-      });
+      const savedPath = path.join(AVATARS_DIR, req.file.filename);
+      if (storage.useSupabase()) {
+        const buf = await fs.readFile(savedPath);
+        await storage.uploadAvatar(uid, 'projects', projectId, buf);
+        await fs.unlink(savedPath).catch(() => {});
+      } else {
+        const keepFile = req.file.filename;
+        const exts = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic'];
+        exts.forEach((ext) => {
+          const fname = projectId + ext;
+          if (fname === keepFile) return;
+          const oldPath = path.join(AVATARS_DIR, fname);
+          if (fsSync.existsSync(oldPath)) try { fsSync.unlinkSync(oldPath); } catch (_) {}
+        });
+      }
       res.json({ ok: true });
     } catch (e) {
       res.status(500).json({ error: String(e.message) });
@@ -2642,8 +2654,14 @@ api.delete('/campaigns/:campaignId', (req, res) => {
   }
 });
 
-api.get('/campaigns/:campaignId/avatar', (req, res) => {
+api.get('/campaigns/:campaignId/avatar', async (req, res) => {
   const id = String(req.params.campaignId);
+  if (storage.useSupabase()) {
+    const uid = req.user?.id;
+    if (!uid) return res.status(401).end();
+    const effectiveUid = await resolveEffectiveUserId(id, uid);
+    return res.redirect(storage.getAvatarUrl(effectiveUid, 'campaigns', id));
+  }
   const filePath = path.join(CAMPAIGN_AVATARS_DIR, `${id}.jpg`);
   if (fsSync.existsSync(filePath)) return res.sendFile(path.resolve(filePath));
   res.status(404).end();
@@ -3195,10 +3213,12 @@ api.get('/calendar', async (req, res) => {
       for (const c of allCampaigns) {
         const postTypes = getPostTypesForPage(c, c.projectId);
         const pts = postTypes.length ? postTypes : [];
+        const calPageIds = (c.pageIds && c.pageIds.length) ? c.pageIds : (c.projectId != null ? [c.projectId] : []);
+        const calIsMultiPage = calPageIds.length > 1;
         for (const pt of pts) {
           if (!isPostTypeDeployed(c, c.projectId, pt.id)) continue;
           if (pt.scheduleEnabled === false) continue;
-          const times = pt.scheduleTimes || c.scheduleTimes || [];
+          const times = pt.scheduleTimes || (calIsMultiPage ? [] : c.scheduleTimes) || [];
           const startDate = pt.scheduleStartDate || c.scheduleStartDate || c.campaignStartDate;
           const endDate = pt.scheduleEndDate || c.scheduleEndDate || c.campaignEndDate;
           if (startDate && dateStr < startDate) continue;
@@ -4515,7 +4535,16 @@ function getTodayDateStringInTZ() {
 }
 
 let lastRunMinute = null;
+// Startup grace period: prevents Railway zero-downtime deploys from double-posting.
+// When Railway deploys, the new instance starts while the old one is still running.
+// By waiting 45s before firing the cron, the old instance handles any scheduled posts
+// for the current minute and is stopped before the new instance starts posting.
+const CRON_STARTUP_TIME = Date.now();
+const CRON_STARTUP_GRACE_MS = 45000;
+
 cron.schedule('* * * * *', async () => {
+  // Skip if we just started (prevents rolling-deploy duplicate posts)
+  if (Date.now() - CRON_STARTUP_TIME < CRON_STARTUP_GRACE_MS) return;
   const now = new Date();
   const currentTime = getCurrentTimeString();
   const todayStr = getTodayDateStringInTZ();
@@ -4530,11 +4559,14 @@ cron.schedule('* * * * *', async () => {
     const campaigns = getAllCampaigns(uid);
     for (const c of campaigns) {
       const pageIds = (c.pageIds && c.pageIds.length) ? c.pageIds : (c.projectId != null ? [c.projectId] : []);
+      const isMultiPage = pageIds.length > 1;
       for (const projectId of pageIds) {
         const postTypes = getPostTypesForPage(c, projectId);
         for (const pt of postTypes) {
           if (!isPostTypeDeployed(c, projectId, pt.id)) continue;
-          const times = pt.scheduleTimes || c.scheduleTimes || [];
+          // For multi-page campaigns, each post type must have its own scheduleTimes.
+          // Do NOT fall back to c.scheduleTimes — that would fire ALL pages at ALL times.
+          const times = pt.scheduleTimes || (isMultiPage ? [] : c.scheduleTimes) || [];
           if (!pt.scheduleEnabled || !times.length || !times.map((t) => String(t)).includes(currentTime)) continue;
           if (c.campaignStartDate && todayStr < c.campaignStartDate) continue;
           if (c.campaignEndDate && todayStr > c.campaignEndDate) continue;

@@ -9,6 +9,7 @@ const ROOT = path.resolve(__dirname);
 
 const UPLOADS_BUCKET = 'uploads';
 const GENERATED_BUCKET = 'generated';
+const AVATARS_BUCKET = 'avatars';
 
 let supabase = null;
 const useSupabase = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -55,7 +56,32 @@ async function initStorage() {
   if (supabase) {
     await ensureBucket(UPLOADS_BUCKET);
     await ensureBucket(GENERATED_BUCKET);
+    await ensureBucket(AVATARS_BUCKET);
   }
+}
+
+// --- Avatars (project / campaign / trend / login profile images) ---
+async function uploadAvatar(userId, entityType, entityId, buffer) {
+  if (!supabase) return null;
+  const storagePath = `${pathPrefix(userId)}${entityType}/${entityId}.jpg`;
+  const { error } = await supabase.storage.from(AVATARS_BUCKET).upload(storagePath, buffer, {
+    contentType: 'image/jpeg',
+    upsert: true,
+  });
+  if (error) throw new Error(error.message);
+  return storagePath;
+}
+
+function getAvatarUrl(userId, entityType, entityId) {
+  if (!supabase) return null;
+  const base = getSupabaseUrl();
+  return `${base}/${AVATARS_BUCKET}/${pathPrefix(userId)}${entityType}/${entityId}.jpg`;
+}
+
+async function deleteAvatar(userId, entityType, entityId) {
+  if (!supabase) return;
+  const storagePath = `${pathPrefix(userId)}${entityType}/${entityId}.jpg`;
+  await supabase.storage.from(AVATARS_BUCKET).remove([storagePath]).catch(() => {});
 }
 
 // --- Local disk helpers (used when not using Supabase) ---
@@ -270,4 +296,7 @@ module.exports = {
   folderStoragePath,
   localUploadsPath,
   localGeneratedPath,
+  uploadAvatar,
+  getAvatarUrl,
+  deleteAvatar,
 };
