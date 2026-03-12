@@ -1741,13 +1741,10 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
   const payload = {
     post: {
       accountId,
-      autoAddMusic: addMusic,
       content: {
         text: opts.text || '',
         mediaUrls: webContentUrls,
         platform: 'tiktok',
-        addMusicToCarousel: addMusic,
-        autoAddMusic: addMusic,
       },
       target: {
         targetType: 'tiktok',
@@ -1759,6 +1756,7 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
         isYourBrand: opts.isYourBrand ?? false,
         isAiGenerated: opts.isAiGenerated ?? false,
         isDraft: opts.isDraft ?? false,
+        autoAddMusic: addMusic,
         ...(opts.title ? { title: String(opts.title).slice(0, 90) } : {}),
         ...(opts.imageCoverIndex != null ? { imageCoverIndex: opts.imageCoverIndex } : {}),
         ...(opts.videoCoverTimestamp != null ? { videoCoverTimestamp: opts.videoCoverTimestamp } : {}),
