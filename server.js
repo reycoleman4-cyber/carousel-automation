@@ -4583,8 +4583,14 @@ cron.schedule('* * * * *', async () => {
     return;
   }
   const scheduledAtIso = getScheduleUtcIso(todayStr, currentTime, TZ);
+  const existingOutcomes = runOutcomesByKey(await readRunOutcomes());
   console.log(`[scheduler] ${currentTime} (${todayStr}): ${runs.length} run(s) to execute`);
   for (const { userId: uid, campaign: c, projectId, postTypeId } of runs) {
+    const runKey = `${projectId}|${c.id}|${postTypeId}|${scheduledAtIso}`;
+    if (existingOutcomes[runKey] && existingOutcomes[runKey].status === 'success') {
+      console.log(`[scheduler] Already sent, skipping: ${c.name} page ${projectId} pt ${postTypeId} @ ${scheduledAtIso}`);
+      continue;
+    }
     const pt = getPostType(c, postTypeId, projectId);
     const projects = getProjects(uid);
     const project = projects.find((p) => p.id === parseInt(String(projectId), 10));
