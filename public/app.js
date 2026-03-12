@@ -3817,6 +3817,7 @@ function renderCampaigns() {
         const sharedBadge = c._sharedOwnerId
           ? `<span class="release-type-badge" style="background:#6366f1;color:#fff;font-size:0.7em;">Shared by @${escapeHtml(c._sharedOwnerUsername || c._sharedOwnerId)}</span>`
           : '';
+        const pausedBadge = c.paused ? `<span class="release-type-badge" style="background:#6b7280;color:#fff;font-size:0.7em;">Paused</span>` : '';
         const avatarImg = `<img src="${campaignAvatarUrl(c.id)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(c.name || 'C').charAt(0).toUpperCase()}</span>`;
         return `
           <div class="campaigns-list-item">
@@ -3828,6 +3829,7 @@ function renderCampaigns() {
                     <span class="list-card-title">${escapeHtml(c.name)}</span>
                     ${releaseTypeBadge ? releaseTypeBadge : ''}
                     ${sharedBadge}
+                    ${pausedBadge}
                   </div>
                   <span class="list-card-meta">${releaseLabel ? escapeHtml(releaseLabel) : 'No release date'}</span>
                 </div>
@@ -3900,7 +3902,9 @@ function renderCampaignDetail(campaignId) {
               <button type="button" class="btn btn-secondary" id="addReleaseDayBtn" title="Set release date">${campaign.releaseDate ? 'Change release day' : 'Add release day'}</button>
               <button type="button" class="btn btn-secondary" id="addCampaignDateRangeBtn" title="Set campaign date range">${(campaign.campaignStartDate || campaign.campaignEndDate) ? 'Change campaign dates' : 'Campaign dates'}</button>
               <button type="button" class="btn btn-secondary" id="addPageToCampaignBtn" title="Add page to campaign">+ Add page</button>
+              <button type="button" class="btn ${campaign.paused ? 'btn-primary' : 'btn-secondary'}" id="campaignPauseBtn" title="${campaign.paused ? 'Resume campaign' : 'Pause campaign'}">${campaign.paused ? '▶ Resume' : '⏸ Pause'}</button>
             </div>
+            ${campaign.paused ? `<div class="campaign-paused-banner">⏸ Campaign paused — no posts will be deployed and this campaign is hidden from the calendar.</div>` : ''}
             <div class="campaign-notes-wrap">
               <label class="field campaign-notes-label">
                 <span>Notes</span>
@@ -4121,6 +4125,16 @@ function renderCampaignDetail(campaignId) {
         }
       });
     };
+    const pauseBtn = document.getElementById('campaignPauseBtn');
+    if (pauseBtn) pauseBtn.onclick = () => {
+      const nowPaused = !campaign.paused;
+      apiUpdateCampaign(pageIds[0] || '', cid, { ...campaign, paused: nowPaused }).then((c) => {
+        campaign = c;
+        invalidateApiCache('allCampaigns');
+        renderCampaignDetail(cid);
+      }).catch((err) => showAlert(err.message || 'Failed to update campaign'));
+    };
+
     const addReleaseBtn = document.getElementById('addReleaseDayBtn');
     const releaseDateEl = document.getElementById('campaignDetailReleaseDate');
     if (addReleaseBtn) addReleaseBtn.onclick = () => {

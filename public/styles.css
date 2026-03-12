@@ -603,6 +603,7 @@ body {
 .campaign-scheduled-count { margin: 4px 0 0 0; font-size: 14px; font-weight: 500; color: var(--text-secondary); }
 .campaign-detail-actions-below-release { margin-top: 8px; justify-content: center; align-self: stretch; }
 .campaign-detail-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; width: 100%; box-sizing: border-box; }
+.campaign-paused-banner { margin-top: 12px; padding: 10px 16px; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 8px; color: #374151; font-size: 0.9em; text-align: center; width: 100%; box-sizing: border-box; }
 .campaign-notes-wrap { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); width: 100%; max-width: 100%; box-sizing: border-box; align-self: stretch; }
 .campaign-notes-label { display: block; margin-bottom: 8px; }
 .campaign-notes-label span { display: block; font-weight: 500; font-size: 0.875rem; color: var(--text-muted); margin-bottom: 4px; }

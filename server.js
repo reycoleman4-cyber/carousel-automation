@@ -2400,6 +2400,7 @@ api.put('/projects/:projectId/campaigns/:campaignId', async (req, res) => {
     releaseType,
     sendAsDraft: req.body.sendAsDraft !== undefined ? !!req.body.sendAsDraft : campaign.sendAsDraft,
     addMusicToCarousel: req.body.addMusicToCarousel !== undefined ? !!req.body.addMusicToCarousel : campaign.addMusicToCarousel,
+    paused: req.body.paused !== undefined ? !!req.body.paused : (campaign.paused || false),
   };
   saveCampaign(updated, effectiveUid);
   res.json(ensurePostTypes(updated, projectId));
@@ -3220,6 +3221,7 @@ api.get('/calendar', async (req, res) => {
       const dateStr = date.toISOString().slice(0, 10);
       const dayOfWeek = date.getUTCDay();
       for (const c of allCampaigns) {
+        if (c.paused) continue;
         const postTypes = getPostTypesForPage(c, c.projectId);
         const pts = postTypes.length ? postTypes : [];
         for (const pt of pts) {
@@ -4558,6 +4560,7 @@ cron.schedule('* * * * *', async () => {
   for (const uid of userIds) {
     const campaigns = getAllCampaigns(uid);
     for (const c of campaigns) {
+      if (c.paused) continue;
       const pageIds = (c.pageIds && c.pageIds.length) ? c.pageIds : (c.projectId != null ? [c.projectId] : []);
       for (const projectId of pageIds) {
         const postTypes = getPostTypesForPage(c, projectId);
