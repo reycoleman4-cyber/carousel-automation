@@ -40,12 +40,20 @@ function generatedStoragePath(projectId, campaignId, filename, userId) {
   return `${pathPrefix(userId)}${projectId}/${campaignId}/${filename}`;
 }
 
-/** Create bucket if missing; use public: true so Blotato (and direct links) can fetch media without auth. */
+/** Create bucket if missing; use public: true so Blotato (and direct links) can fetch media without auth.
+ *  If the bucket already exists, ensure it is set to public so media URLs are accessible. */
 async function ensureBucket(bucket) {
   if (!supabase) return;
   try {
     const { error } = await supabase.storage.createBucket(bucket, { public: true });
-    if (error && error.message && !error.message.includes('already exists')) throw error;
+    if (error && error.message && error.message.includes('already exists')) {
+      // Bucket exists — make sure it is public so Blotato can fetch URLs.
+      await supabase.storage.updateBucket(bucket, { public: true }).catch((e) => {
+        console.warn(`[storage] Could not set bucket ${bucket} to public:`, e?.message);
+      });
+    } else if (error) {
+      throw error;
+    }
   } catch (e) {
     if (e?.message && !e.message.includes('already exists')) console.warn(`[storage] Bucket ${bucket}:`, e.message);
   }

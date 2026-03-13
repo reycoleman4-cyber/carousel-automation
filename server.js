@@ -1755,23 +1755,33 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
         isBrandedContent: opts.isBrandedContent ?? false,
         isYourBrand: opts.isYourBrand ?? false,
         isAiGenerated: opts.isAiGenerated ?? false,
-        isDraft: opts.isDraft ?? false,
-        autoAddMusic: addMusic,
+        // Only include optional fields when they carry a non-default value.
+        // autoAddMusic is photo-only; omitting it on video posts avoids TikTok API rejections.
+        ...(addMusic ? { autoAddMusic: true } : {}),
+        ...(opts.isDraft ? { isDraft: true } : {}),
         ...(opts.title ? { title: String(opts.title).slice(0, 90) } : {}),
         ...(opts.imageCoverIndex != null ? { imageCoverIndex: opts.imageCoverIndex } : {}),
         ...(opts.videoCoverTimestamp != null ? { videoCoverTimestamp: opts.videoCoverTimestamp } : {}),
       },
     },
   };
-  if (opts.isDraft) payload.isDraft = true;
-  const res = await fetch('https://backend.blotato.com/v2/posts', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'blotato-api-key': apiKey,
-    },
-    body: JSON.stringify(payload),
-  });
+  // 30-second timeout so a slow/hung Blotato response doesn't block the scheduler indefinitely.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  let res;
+  try {
+    res = await fetch('https://backend.blotato.com/v2/posts', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'blotato-api-key': apiKey,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
   const text = await res.text();
   if (!res.ok) throw new Error(`Blotato: ${res.status} ${text}`);
   return text ? JSON.parse(text) : {};
