@@ -1739,15 +1739,11 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
   const opts = options || {};
   const addMusic = opts.addMusicToCarousel === true;
   const isDraft = !!opts.isDraft;
-  // Per Blotato docs: scheduledTime MUST be at the ROOT level of the payload — if placed
-  // inside post, content, target, or options it is silently ignored and the post publishes
-  // immediately. isDraft:true goes inside target per the TikTok platform spec.
-  const draftScheduledTime = isDraft
-    ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00')
-    : null;
+  // Per Blotato docs: isDraft is a TikTok-specific optional field that goes inside target.
+  // scheduledTime is NOT sent alongside isDraft — they are mutually exclusive mechanisms:
+  // isDraft creates a TikTok notification draft; scheduledTime schedules auto-publishing.
+  // Sending both causes Blotato/TikTok to fail silently or reject the request.
   const payload = {
-    // scheduledTime at ROOT level (not inside post) — Blotato requirement.
-    ...(draftScheduledTime ? { scheduledTime: draftScheduledTime } : {}),
     post: {
       accountId,
       content: {
