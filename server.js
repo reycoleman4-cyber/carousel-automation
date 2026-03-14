@@ -1738,9 +1738,17 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
   if (!apiKey || !accountId || !webContentUrls || webContentUrls.length === 0) return null;
   const opts = options || {};
   const addMusic = opts.addMusicToCarousel === true;
+  // When the post is marked as a draft, use scheduledTime (30 days out) instead of isDraft:true.
+  // Blotato's isDraft flag uses TikTok's notification-draft API, which requires a scheduledTime and
+  // consistently returns "Unknown error reason" without one. Using scheduledTime puts the post in
+  // Blotato's scheduled queue for review without triggering TikTok's unreliable draft API path.
+  const draftScheduledTime = opts.isDraft
+    ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00')
+    : null;
   const payload = {
     post: {
       accountId,
+      ...(draftScheduledTime ? { scheduledTime: draftScheduledTime } : {}),
       content: {
         text: opts.text || '',
         mediaUrls: webContentUrls,
@@ -1758,7 +1766,6 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
         // Only include optional fields when they carry a non-default value.
         // autoAddMusic is photo-only; omitting it on video posts avoids TikTok API rejections.
         ...(addMusic ? { autoAddMusic: true } : {}),
-        ...(opts.isDraft ? { isDraft: true } : {}),
         ...(opts.title ? { title: String(opts.title).slice(0, 90) } : {}),
         ...(opts.imageCoverIndex != null ? { imageCoverIndex: opts.imageCoverIndex } : {}),
         ...(opts.videoCoverTimestamp != null ? { videoCoverTimestamp: opts.videoCoverTimestamp } : {}),
@@ -4555,18 +4562,10 @@ function getTodayDateStringInTZ() {
   return `${y}-${m}-${d}`;
 }
 
-let lastRunMinute = null;
-cron.schedule('* * * * *', async () => {
-  const now = new Date();
-  const currentTime = getCurrentTimeString();
-  const todayStr = getTodayDateStringInTZ();
-  const key = `${todayStr}-${currentTime}`;
-  if (lastRunMinute === key) return;
-  lastRunMinute = key;
-  const dowFormatter = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' });
-  const dayOfWeek = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(dowFormatter.format(now));
-  const userIds = listUserIdsWithData();
+/** Returns all scheduled runs for a specific HH:MM time on a given date/day-of-week. */
+function getScheduledRunsForTime(timeStr, dateStr, dayOfWeek) {
   const runs = [];
+  const userIds = listUserIdsWithData();
   for (const uid of userIds) {
     const campaigns = getAllCampaigns(uid);
     for (const c of campaigns) {
@@ -4577,11 +4576,11 @@ cron.schedule('* * * * *', async () => {
         for (const pt of postTypes) {
           if (!isPostTypeDeployed(c, projectId, pt.id)) continue;
           const times = pt.scheduleTimes || c.scheduleTimes || [];
-          if (!pt.scheduleEnabled || !times.length || !times.map((t) => String(t)).includes(currentTime)) continue;
-          if (c.campaignStartDate && todayStr < c.campaignStartDate) continue;
-          if (c.campaignEndDate && todayStr > c.campaignEndDate) continue;
-          if (pt.scheduleStartDate && todayStr < pt.scheduleStartDate) continue;
-          if (pt.scheduleEndDate && todayStr > pt.scheduleEndDate) continue;
+          if (!pt.scheduleEnabled || !times.length || !times.map((t) => String(t)).includes(timeStr)) continue;
+          if (c.campaignStartDate && dateStr < c.campaignStartDate) continue;
+          if (c.campaignEndDate && dateStr > c.campaignEndDate) continue;
+          if (pt.scheduleStartDate && dateStr < pt.scheduleStartDate) continue;
+          if (pt.scheduleEndDate && dateStr > pt.scheduleEndDate) continue;
           const days = pt.scheduleDaysOfWeek ?? [0, 1, 2, 3, 4, 5, 6];
           if (days.length === 0 || !days.includes(dayOfWeek)) continue;
           runs.push({ userId: uid, campaign: c, projectId, postTypeId: pt.id });
@@ -4589,16 +4588,64 @@ cron.schedule('* * * * *', async () => {
       }
     }
   }
-  if (!runs.length) {
-    return;
+  return runs;
+}
+
+/** Returns { time: 'HH:MM', date: 'YYYY-MM-DD' } for n minutes before the given time/date. */
+function subtractMinutesFromTime(timeStr, dateStr, n) {
+  const [h, m] = timeStr.split(':').map(Number);
+  let totalMinutes = h * 60 + m - n;
+  let adjDate = dateStr;
+  if (totalMinutes < 0) {
+    totalMinutes += 24 * 60;
+    const [y, mo, d] = dateStr.split('-').map(Number);
+    const prev = new Date(Date.UTC(y, mo - 1, d - 1));
+    adjDate = prev.getUTCFullYear() + '-' +
+      String(prev.getUTCMonth() + 1).padStart(2, '0') + '-' +
+      String(prev.getUTCDate()).padStart(2, '0');
   }
-  const scheduledAtIso = getScheduleUtcIso(todayStr, currentTime, TZ);
+  const adjH = String(Math.floor(totalMinutes / 60)).padStart(2, '0');
+  const adjM = String(totalMinutes % 60).padStart(2, '0');
+  return { time: `${adjH}:${adjM}`, date: adjDate };
+}
+
+let lastRunMinute = null;
+cron.schedule('* * * * *', async () => {
+  const now = new Date();
+  const currentTime = getCurrentTimeString();
+  const todayStr = getTodayDateStringInTZ();
+  const key = `${todayStr}-${currentTime}`;
+  if (lastRunMinute === key) return;
+  lastRunMinute = key;
+  const dowFormatter = new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' });
+  const dayOfWeek = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(dowFormatter.format(now));
+
+  // Collect runs for the current minute plus a 5-minute catch-up window.
+  // The catch-up recovers posts missed during a Railway deploy restart.
+  const allRunsToProcess = [];
+  const CATCHUP_MINUTES = 5;
+  for (let i = 0; i <= CATCHUP_MINUTES; i++) {
+    const slot = i === 0 ? { time: currentTime, date: todayStr } : subtractMinutesFromTime(currentTime, todayStr, i);
+    const slotDow = i === 0 ? dayOfWeek : (() => {
+      const slotDate = new Date(slot.date + 'T12:00:00Z');
+      return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(
+        new Intl.DateTimeFormat('en-US', { timeZone: TZ, weekday: 'short' }).format(slotDate)
+      );
+    })();
+    const slotRuns = getScheduledRunsForTime(slot.time, slot.date, slotDow);
+    const slotIso = getScheduleUtcIso(slot.date, slot.time, TZ);
+    for (const r of slotRuns) allRunsToProcess.push({ ...r, scheduledAtIso: slotIso });
+  }
+
+  if (!allRunsToProcess.length) return;
   const existingOutcomes = runOutcomesByKey(await readRunOutcomes());
-  console.log(`[scheduler] ${currentTime} (${todayStr}): ${runs.length} run(s) to execute`);
-  for (const { userId: uid, campaign: c, projectId, postTypeId } of runs) {
+  console.log(`[scheduler] ${currentTime} (${todayStr}): ${allRunsToProcess.length} run(s) to process (incl. catch-up)`);
+  for (const { userId: uid, campaign: c, projectId, postTypeId, scheduledAtIso } of allRunsToProcess) {
     const runKey = `${projectId}|${c.id}|${postTypeId}|${scheduledAtIso}`;
-    if (existingOutcomes[runKey] && existingOutcomes[runKey].status === 'success') {
-      console.log(`[scheduler] Already sent, skipping: ${c.name} page ${projectId} pt ${postTypeId} @ ${scheduledAtIso}`);
+    // Block on ANY existing outcome (success or failure) — prevents duplicate sends when
+    // Railway rolling deploys create two overlapping instances for the same scheduled minute.
+    if (existingOutcomes[runKey]) {
+      console.log(`[scheduler] Already attempted (${existingOutcomes[runKey].status}), skipping: ${c.name} page ${projectId} pt ${postTypeId} @ ${scheduledAtIso}`);
       continue;
     }
     const pt = getPostType(c, postTypeId, projectId);
