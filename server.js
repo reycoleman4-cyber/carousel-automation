@@ -1734,6 +1734,42 @@ async function runTrendPipeline(userId, trendId, textStyleOverride, textOptionsO
   return runData;
 }
 
+// Poll GET /v2/posts/:postSubmissionId every 2 seconds until the post reaches a terminal
+// status (published or failed). Blotato processes posts asynchronously — the initial POST
+// returns 201 immediately, but the actual TikTok submission happens in the background.
+// Max wait: 3 minutes (180s). Rate limit on GET is 60 req/min so 2s interval is safe.
+async function pollBlotatoPost(apiKey, postSubmissionId, maxWaitMs = 180000) {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), 10000);
+    let pollRes;
+    try {
+      pollRes = await fetch(`https://backend.blotato.com/v2/posts/${postSubmissionId}`, {
+        headers: { 'blotato-api-key': apiKey },
+        signal: ctrl.signal,
+      });
+    } catch (_) {
+      // transient network error — keep polling
+      continue;
+    } finally {
+      clearTimeout(tid);
+    }
+    if (!pollRes.ok) continue; // transient server error — keep polling
+    const data = await pollRes.json().catch(() => null);
+    if (!data) continue;
+    const status = data.status;
+    if (status === 'published') return data;
+    if (status === 'failed') {
+      const reason = data.errorMessage || data.error || 'Post failed';
+      throw new Error(`TikTok rejected post: ${reason}`);
+    }
+    // 'in-progress' / 'processing' — keep polling
+  }
+  throw new Error('Blotato post timed out waiting for TikTok confirmation (3 min)');
+}
+
 async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
   if (!apiKey || !accountId || !webContentUrls || webContentUrls.length === 0) return null;
   const opts = options || {};
@@ -1770,10 +1806,8 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
       },
     },
   };
-  // 90-second timeout: draft posts trigger Blotato's internal TikTok retry cycle (up to 3 retries
-  // with delays), which can exceed the old 30-second limit and cause spurious abort errors.
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 90000);
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
   let res;
   try {
     res = await fetch('https://backend.blotato.com/v2/posts', {
@@ -1790,7 +1824,12 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
   }
   const text = await res.text();
   if (!res.ok) throw new Error(`Blotato: ${res.status} ${text}`);
-  return text ? JSON.parse(text) : {};
+  const json = text ? JSON.parse(text) : {};
+  // Poll for the actual terminal status — the 201 only means Blotato queued it.
+  if (json.postSubmissionId) {
+    return await pollBlotatoPost(apiKey, json.postSubmissionId);
+  }
+  return json;
 }
 
 // --- Multer (per campaign) ---
