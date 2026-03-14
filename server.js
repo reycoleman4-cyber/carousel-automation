@@ -1739,9 +1739,18 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
   const opts = options || {};
   const addMusic = opts.addMusicToCarousel === true;
   const isDraft = !!opts.isDraft;
+  // When sending as draft: TikTok's notification-draft API requires a scheduledTime.
+  // Without it, TikTok returns "Unknown error reason" and Blotato retries 3 times before giving up.
+  // We set scheduledTime 30 days out (at the post level, not inside target) so the post lands in
+  // Blotato's scheduled queue — giving the user time to review and manually publish or cancel.
+  // isDraft: true stays in target so Blotato knows this is a draft, not an auto-publish.
+  const draftScheduledTime = isDraft
+    ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00')
+    : null;
   const payload = {
     post: {
       accountId,
+      ...(draftScheduledTime ? { scheduledTime: draftScheduledTime } : {}),
       content: {
         text: opts.text || '',
         mediaUrls: webContentUrls,
@@ -1766,9 +1775,10 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
       },
     },
   };
-  // 30-second timeout so a slow/hung Blotato response doesn't block the scheduler indefinitely.
+  // 90-second timeout: draft posts trigger Blotato's internal TikTok retry cycle (up to 3 retries
+  // with delays), which can exceed the old 30-second limit and cause spurious abort errors.
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  const timeoutId = setTimeout(() => controller.abort(), 90000);
   let res;
   try {
     res = await fetch('https://backend.blotato.com/v2/posts', {
