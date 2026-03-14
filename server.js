@@ -1749,8 +1749,7 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
       },
       target: {
         targetType: 'tiktok',
-        // TikTok requires SELF_ONLY privacy for draft posts; PUBLIC_TO_EVERYONE is rejected.
-        privacyLevel: isDraft ? 'SELF_ONLY' : (opts.privacyLevel ?? 'PUBLIC_TO_EVERYONE'),
+        privacyLevel: opts.privacyLevel ?? 'PUBLIC_TO_EVERYONE',
         disabledComments: opts.disabledComments ?? false,
         disabledDuet: opts.disabledDuet ?? false,
         disabledStitch: opts.disabledStitch ?? false,
