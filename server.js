@@ -1738,17 +1738,10 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
   if (!apiKey || !accountId || !webContentUrls || webContentUrls.length === 0) return null;
   const opts = options || {};
   const addMusic = opts.addMusicToCarousel === true;
-  // When the post is marked as a draft, use scheduledTime (30 days out) instead of isDraft:true.
-  // Blotato's isDraft flag uses TikTok's notification-draft API, which requires a scheduledTime and
-  // consistently returns "Unknown error reason" without one. Using scheduledTime puts the post in
-  // Blotato's scheduled queue for review without triggering TikTok's unreliable draft API path.
-  const draftScheduledTime = opts.isDraft
-    ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00')
-    : null;
+  const isDraft = !!opts.isDraft;
   const payload = {
     post: {
       accountId,
-      ...(draftScheduledTime ? { scheduledTime: draftScheduledTime } : {}),
       content: {
         text: opts.text || '',
         mediaUrls: webContentUrls,
@@ -1756,7 +1749,8 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
       },
       target: {
         targetType: 'tiktok',
-        privacyLevel: opts.privacyLevel ?? 'PUBLIC_TO_EVERYONE',
+        // TikTok requires SELF_ONLY privacy for draft posts; PUBLIC_TO_EVERYONE is rejected.
+        privacyLevel: isDraft ? 'SELF_ONLY' : (opts.privacyLevel ?? 'PUBLIC_TO_EVERYONE'),
         disabledComments: opts.disabledComments ?? false,
         disabledDuet: opts.disabledDuet ?? false,
         disabledStitch: opts.disabledStitch ?? false,
@@ -1766,6 +1760,7 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
         // Only include optional fields when they carry a non-default value.
         // autoAddMusic is photo-only; omitting it on video posts avoids TikTok API rejections.
         ...(addMusic ? { autoAddMusic: true } : {}),
+        ...(isDraft ? { isDraft: true } : {}),
         ...(opts.title ? { title: String(opts.title).slice(0, 90) } : {}),
         ...(opts.imageCoverIndex != null ? { imageCoverIndex: opts.imageCoverIndex } : {}),
         ...(opts.videoCoverTimestamp != null ? { videoCoverTimestamp: opts.videoCoverTimestamp } : {}),
