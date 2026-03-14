@@ -1734,6 +1734,33 @@ async function runTrendPipeline(userId, trendId, textStyleOverride, textOptionsO
   return runData;
 }
 
+// Upload a single media URL to Blotato's /v2/media endpoint so TikTok receives a
+// Blotato-hosted URL instead of a raw Supabase URL. TikTok's draft API commonly rejects
+// external CDN URLs; Blotato-hosted URLs bypass this restriction.
+// Rate limit on /v2/media is 10 req/min — callers must sequence uploads.
+async function uploadMediaToBlotato(apiKey, mediaUrl) {
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), 30000);
+  let res;
+  try {
+    res = await fetch('https://backend.blotato.com/v2/media', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'blotato-api-key': apiKey },
+      body: JSON.stringify({ url: mediaUrl }),
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(tid);
+  }
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    console.warn(`[blotato] Media upload failed (${res.status}): ${txt} — falling back to original URL`);
+    return mediaUrl; // fall back to original URL rather than aborting the whole post
+  }
+  const data = await res.json().catch(() => null);
+  return (data && data.url) ? data.url : mediaUrl;
+}
+
 // Poll GET /v2/posts/:postSubmissionId every 2 seconds until the post reaches a terminal
 // status (published or failed). Blotato processes posts asynchronously — the initial POST
 // returns 201 immediately, but the actual TikTok submission happens in the background.
@@ -1776,15 +1803,23 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
   const addMusic = opts.addMusicToCarousel === true;
   const isDraft = !!opts.isDraft;
   // Per Blotato docs: isDraft is a TikTok-specific optional field that goes inside target.
-  // scheduledTime is NOT sent alongside isDraft — they are mutually exclusive mechanisms:
-  // isDraft creates a TikTok notification draft; scheduledTime schedules auto-publishing.
-  // Sending both causes Blotato/TikTok to fail silently or reject the request.
+  // For draft posts, TikTok's API commonly rejects external CDN URLs (e.g. Supabase).
+  // Pre-upload each URL to Blotato's /v2/media so TikTok receives a Blotato-hosted URL.
+  let finalMediaUrls = webContentUrls;
+  if (isDraft) {
+    const uploaded = [];
+    for (const url of webContentUrls) {
+      const blotatoUrl = await uploadMediaToBlotato(apiKey, url);
+      uploaded.push(blotatoUrl);
+    }
+    finalMediaUrls = uploaded;
+  }
   const payload = {
     post: {
       accountId,
       content: {
         text: opts.text || '',
-        mediaUrls: webContentUrls,
+        mediaUrls: finalMediaUrls,
         platform: 'tiktok',
       },
       target: {
