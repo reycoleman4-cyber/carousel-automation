@@ -2123,11 +2123,16 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
     copyAllBtn.onclick = () => { navigator.clipboard.writeText(urls.join('\n')); copyAllBtn.textContent = 'Copied!'; setTimeout(() => { copyAllBtn.textContent = 'Copy all URLs'; }, 1500); };
   }
   document.getElementById('runNow').onclick = () => {
+    const btn = document.getElementById('runNow');
     const status = document.getElementById('runStatus');
+    if (btn.disabled) return;
+    btn.disabled = true;
     status.textContent = 'Running…';
     status.className = 'run-status loading';
     const sendAsDraft = !!document.getElementById('sendAsDraft')?.checked;
-    apiUpdateCampaign(pid, cid, { ...campaignData, sendAsDraft }, ptId).then((c) => { campaignData = c; return apiCampaignRun(pid, cid, null, null, sendAsDraft, false, ptId); })
+    // Save settings in background — don't block the run on the save completing.
+    apiUpdateCampaign(pid, cid, { ...campaignData, sendAsDraft }, ptId).then((c) => { campaignData = c; }).catch(() => {});
+    apiCampaignRun(pid, cid, null, null, sendAsDraft, false, ptId)
       .then((data) => {
         if (data.error) throw new Error(data.error);
         let msg = `Done. ${(data.webContentUrls || []).length} URL(s) generated.`;
@@ -2137,7 +2142,8 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
         status.className = 'run-status success';
         showUrls(data.webContentUrls || [], data.webContentBase64 || []);
       })
-      .catch((err) => { status.textContent = err.message || 'Run failed'; status.className = 'run-status error'; });
+      .catch((err) => { status.textContent = err.message || 'Run failed'; status.className = 'run-status error'; })
+      .finally(() => { btn.disabled = false; });
   };
   if ((latest.webContentUrls || []).length) showUrls(latest.webContentUrls, latest.webContentBase64 || []);
 }
@@ -2531,14 +2537,17 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
   }
 
   document.getElementById('runNow').onclick = () => {
+    const btn = document.getElementById('runNow');
     const status = document.getElementById('runStatus');
+    if (btn.disabled) return;
+    btn.disabled = true;
     status.textContent = 'Running…';
     status.className = 'run-status loading';
     const textStylePerFolder = getCurrentTextStylePerFolder();
     const textOptionsPerFolder = campaignData.textOptionsPerFolder || [[]];
     const sendAsDraft = !!document.getElementById('sendAsDraft')?.checked;
-    apiUpdateCampaign(pid, cid, { ...campaignData, textStylePerFolder, sendAsDraft }, ptId)
-      .then((c) => { campaignData = c; return apiCampaignRun(pid, cid, textStylePerFolder, textOptionsPerFolder, sendAsDraft, false, ptId); })
+    apiUpdateCampaign(pid, cid, { ...campaignData, textStylePerFolder, sendAsDraft }, ptId).then((c) => { campaignData = c; }).catch(() => {});
+    apiCampaignRun(pid, cid, textStylePerFolder, textOptionsPerFolder, sendAsDraft, false, ptId)
       .then((data) => {
         if (data.error) throw new Error(data.error);
         let msg = `Done. ${(data.webContentUrls || []).length} URL(s) generated.`;
@@ -2548,7 +2557,8 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
         status.className = 'run-status success';
         showUrls(data.webContentUrls || [], data.webContentBase64 || []);
       })
-      .catch((err) => { status.textContent = err.message || 'Run failed'; status.className = 'run-status error'; });
+      .catch((err) => { status.textContent = err.message || 'Run failed'; status.className = 'run-status error'; })
+      .finally(() => { btn.disabled = false; });
   };
 
   if ((latest.webContentUrls || []).length) showUrls(latest.webContentUrls, latest.webContentBase64 || []);
@@ -3262,15 +3272,18 @@ function renderCampaign(projectId, campaignId, postTypeId) {
     }
 
     document.getElementById('runNow').onclick = () => {
+      const btn = document.getElementById('runNow');
       const status = document.getElementById('runStatus');
+      if (btn.disabled) return;
+      btn.disabled = true;
       status.textContent = 'Running…';
       status.className = 'run-status loading';
       const textStylePerFolder = getCurrentTextStylePerFolder();
       const textOptionsPerFolder = campaign.textOptionsPerFolder || [];
       const sendAsDraft = !!document.getElementById('sendAsDraft')?.checked;
       const addMusicToCarousel = !!document.getElementById('addMusicToCarousel')?.checked;
-      apiUpdateCampaign(pid, cid, { ...campaign, textStylePerFolder, sendAsDraft, addMusicToCarousel }, ptId)
-        .then((c) => { campaign = c; return apiCampaignRun(pid, cid, textStylePerFolder, textOptionsPerFolder, sendAsDraft, addMusicToCarousel, ptId); })
+      apiUpdateCampaign(pid, cid, { ...campaign, textStylePerFolder, sendAsDraft, addMusicToCarousel }, ptId).then((c) => { campaign = c; }).catch(() => {});
+      apiCampaignRun(pid, cid, textStylePerFolder, textOptionsPerFolder, sendAsDraft, addMusicToCarousel, ptId)
         .then((data) => {
           if (data.error) throw new Error(data.error);
           let msg = `Done. ${(data.webContentUrls || []).length} URL(s) generated.`;
@@ -3283,7 +3296,8 @@ function renderCampaign(projectId, campaignId, postTypeId) {
         .catch((err) => {
           status.textContent = err.message || 'Run failed';
           status.className = 'run-status error';
-        });
+        })
+        .finally(() => { btn.disabled = false; });
     };
 
     const postTitleInput = document.getElementById('postTitle');
