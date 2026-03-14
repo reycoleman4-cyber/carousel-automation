@@ -1739,11 +1739,11 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
   const opts = options || {};
   const addMusic = opts.addMusicToCarousel === true;
   const isDraft = !!opts.isDraft;
-  // When sending as draft: TikTok's notification-draft API requires a scheduledTime.
-  // Without it, TikTok returns "Unknown error reason" and Blotato retries 3 times before giving up.
-  // We set scheduledTime 30 days out (at the post level, not inside target) so the post lands in
-  // Blotato's scheduled queue — giving the user time to review and manually publish or cancel.
-  // isDraft: true stays in target so Blotato knows this is a draft, not an auto-publish.
+  // When sending as draft: instead of using TikTok's notification-draft API (isDraft: true in
+  // target), which consistently fails with "Unknown error reason after 3 retries", we schedule
+  // the post 30 days out via scheduledTime at the Blotato post level. The post lands in Blotato's
+  // scheduled queue — the user can review it there and either publish manually or cancel before
+  // the 30-day date. scheduledTime must be at the post level (same level as accountId), NOT inside target.
   const draftScheduledTime = isDraft
     ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00')
     : null;
@@ -1768,7 +1768,8 @@ async function sendToBlotato(apiKey, accountId, webContentUrls, options = {}) {
         // Only include optional fields when they carry a non-default value.
         // autoAddMusic is photo-only; omitting it on video posts avoids TikTok API rejections.
         ...(addMusic ? { autoAddMusic: true } : {}),
-        ...(isDraft ? { isDraft: true } : {}),
+        // isDraft removed from target — using scheduledTime at post level instead.
+        // Sending isDraft:true alongside scheduledTime causes TikTok to reject with "Unknown error reason".
         ...(opts.title ? { title: String(opts.title).slice(0, 90) } : {}),
         ...(opts.imageCoverIndex != null ? { imageCoverIndex: opts.imageCoverIndex } : {}),
         ...(opts.videoCoverTimestamp != null ? { videoCoverTimestamp: opts.videoCoverTimestamp } : {}),
