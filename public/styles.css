@@ -53,7 +53,7 @@ body {
   line-height: 1.55;
   font-weight: 450;
   min-height: 100vh;
-  background-image: url('background.avif');
+  background-image: url('background.avif?v=2');
   background-size: cover;
   background-position: center;
   background-attachment: fixed;
