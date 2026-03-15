@@ -1221,6 +1221,15 @@ body::before {
   min-width: 2.5em;
   text-align: right;
 }
+.upload-cancel-btn {
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 3px 10px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+.upload-cancel-btn:hover { color: var(--error); border-color: var(--error); }
 .upload-fact-row {
   max-width: 560px;
   margin: 8px auto 0;

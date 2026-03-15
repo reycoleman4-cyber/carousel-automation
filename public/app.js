@@ -419,6 +419,23 @@ function projectAvatarUrl(projectId) {
   return `${API}/api/projects/${projectId}/avatar?v=${getAvatarVersion('project', projectId)}`;
 }
 
+// Active XHR for in-flight uploads — allows cancellation
+let _currentUploadXhr = null;
+
+/** Cancel the active upload (if any). */
+function cancelUpload() {
+  if (_currentUploadXhr) {
+    _currentUploadXhr.abort();
+    _currentUploadXhr = null;
+  }
+}
+
+/** Handle an upload error, silently ignoring intentional cancellations. */
+function handleUploadError(err) {
+  if (err && err.isCancelled) return;
+  showAlert((err && err.message) || 'Upload failed');
+}
+
 const SOCIAL_FACTS = [
   "TikTok was downloaded over 3 billion times by 2021, making it the most downloaded app of the decade.",
   "The average TikTok user opens the app 19 times per day.",
@@ -562,7 +579,11 @@ function showUploadProgress(percent, label) {
   const wasHidden = wrap.hidden;
   wrap.hidden = false;
   wrap.setAttribute('data-visible', 'true');
-  if (wasHidden) _startFactCycle();
+  if (wasHidden) {
+    _startFactCycle();
+    const cancelBtn = document.getElementById('uploadCancelBtn');
+    if (cancelBtn) cancelBtn.onclick = () => cancelUpload();
+  }
 }
 
 /** Hide the upload progress bar */
@@ -573,6 +594,7 @@ function hideUploadProgress() {
   wrap.hidden = true;
   const fill = document.getElementById('uploadProgressFill');
   if (fill) fill.style.width = '0%';
+  _currentUploadXhr = null;
   _stopFactCycle();
 }
 
@@ -608,6 +630,7 @@ function campaignUploadWithProgress(projectId, campaignId, folderNum, files, pos
   return getAuthHeaders().then((headers) => {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
+      _currentUploadXhr = xhr;
       xhr.open('POST', url);
       if (headers.Authorization) xhr.setRequestHeader('Authorization', headers.Authorization);
       xhr.upload.addEventListener('progress', (e) => {
@@ -615,6 +638,7 @@ function campaignUploadWithProgress(projectId, campaignId, folderNum, files, pos
         else showUploadProgress(0, label);
       });
       xhr.addEventListener('load', () => {
+        _currentUploadXhr = null;
         hideUploadProgress();
         const text = xhr.responseText || '';
         if (xhr.status >= 200 && xhr.status < 300) {
@@ -630,8 +654,8 @@ function campaignUploadWithProgress(projectId, campaignId, folderNum, files, pos
           reject(new Error(msg));
         }
       });
-      xhr.addEventListener('error', () => { hideUploadProgress(); reject(new Error('Upload failed. Check your connection and try again.')); });
-      xhr.addEventListener('abort', () => { hideUploadProgress(); reject(new Error('Upload cancelled')); });
+      xhr.addEventListener('error', () => { _currentUploadXhr = null; hideUploadProgress(); reject(new Error('Upload failed. Check your connection and try again.')); });
+      xhr.addEventListener('abort', () => { _currentUploadXhr = null; hideUploadProgress(); const e = new Error('Upload cancelled'); e.isCancelled = true; reject(e); });
       xhr.send(form);
     });
   }).catch((err) => { hideUploadProgress(); return Promise.reject(err); });
@@ -2083,7 +2107,7 @@ function openFolderModal(projectId, campaignId, folderNum, folderLabel, onClose)
     if (!files?.length) return;
     campaignUploadWithProgress(projectId, campaignId, folderNum, files)
       .then(() => { setTimeout(() => { refresh(); if (onClose) onClose(); }, 80); })
-      .catch(() => showAlert('Upload failed'));
+      .catch(handleUploadError);
     addInput.value = '';
   };
 
@@ -2246,9 +2270,9 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
     if (dropzone && input) {
       dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('dragover'); };
       dropzone.ondragleave = () => dropzone.classList.remove('dragover');
-      dropzone.ondrop = (e) => { e.preventDefault(); dropzone.classList.remove('dragover'); const files = e.dataTransfer.files; if (files?.length) campaignUploadWithProgress(pid, cid, num, files, ptId, 'video').then(updateFolderCounts).catch((err) => showAlert(err.message || 'Upload failed')); };
+      dropzone.ondrop = (e) => { e.preventDefault(); dropzone.classList.remove('dragover'); const files = e.dataTransfer.files; if (files?.length) campaignUploadWithProgress(pid, cid, num, files, ptId, 'video').then(updateFolderCounts).catch(handleUploadError); };
     }
-    if (input) input.onchange = (e) => { const files = e.target.files; if (files?.length) campaignUploadWithProgress(pid, cid, num, files, ptId, 'video').then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed')); };
+    if (input) input.onchange = (e) => { const files = e.target.files; if (files?.length) campaignUploadWithProgress(pid, cid, num, files, ptId, 'video').then(() => { updateFolderCounts(); input.value = ''; }).catch(handleUploadError); };
   }
   updateFolderCounts();
   document.getElementById('deployed').onchange = (e) => apiUpdateCampaign(pid, cid, { ...campaignData, deployed: e.target.checked }, ptId).then((c) => { campaignData = c; });
@@ -2522,12 +2546,12 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
       e.preventDefault();
       dropzone.classList.remove('dragover');
       const files = e.dataTransfer.files;
-      if (files?.length) campaignUploadWithProgress(pid, cid, 1, files, ptId, 'video_text').then(updateFolderCounts).catch((err) => showAlert(err.message || 'Upload failed'));
+      if (files?.length) campaignUploadWithProgress(pid, cid, 1, files, ptId, 'video_text').then(updateFolderCounts).catch(handleUploadError);
     };
   }
   if (input) input.onchange = (e) => {
     const files = e.target.files;
-    if (files?.length) campaignUploadWithProgress(pid, cid, 1, files, ptId, 'video_text').then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed'));
+    if (files?.length) campaignUploadWithProgress(pid, cid, 1, files, ptId, 'video_text').then(() => { updateFolderCounts(); input.value = ''; }).catch(handleUploadError);
   };
 
   document.getElementById('deployed').onchange = (e) => apiUpdateCampaign(pid, cid, { ...campaignData, deployed: e.target.checked }, ptId).then((c) => { campaignData = c; });
@@ -3172,13 +3196,13 @@ function renderCampaign(projectId, campaignId, postTypeId) {
           dropzone.classList.remove('dragover');
           const files = e.dataTransfer.files;
           if (!files?.length) return;
-          campaignUploadWithProgress(pid, cid, num, files, ptId).then(updateFolderCounts).catch((err) => showAlert(err.message || 'Upload failed'));
+          campaignUploadWithProgress(pid, cid, num, files, ptId).then(updateFolderCounts).catch(handleUploadError);
         };
       }
       if (input) input.onchange = (e) => {
         const files = e.target.files;
         if (!files?.length) return;
-        campaignUploadWithProgress(pid, cid, num, files, ptId).then(() => { updateFolderCounts(); input.value = ''; }).catch((err) => showAlert(err.message || 'Upload failed'));
+        campaignUploadWithProgress(pid, cid, num, files, ptId).then(() => { updateFolderCounts(); input.value = ''; }).catch(handleUploadError);
       };
       const deleteBtn = dropzone && dropzone.querySelector('.dropzone-delete');
       if (deleteBtn) deleteBtn.onclick = (e) => {
@@ -3621,7 +3645,7 @@ function renderCampaignFolderPhotos(projectId, campaignId, folderNum, postTypeId
       if (!files?.length) return;
       campaignUploadWithProgress(pid, cid, fnum, files, ptId)
         .then(() => { setTimeout(refresh, 80); })
-        .catch(() => showAlert('Upload failed'));
+        .catch(handleUploadError);
       addInput.value = '';
     };
     const card = main.querySelector('.card');
@@ -3778,7 +3802,7 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
       const mediaType = (pt && pt.mediaType === 'video_text') ? 'video_text' : 'video';
       campaignUploadWithProgress(pid, cid, fnum, files, ptId, mediaType)
         .then(() => { setTimeout(refresh, 80); })
-        .catch((err) => showAlert(err.message || 'Upload failed'));
+        .catch(handleUploadError);
       addInput.value = '';
     };
     const cardVideos = main.querySelector('.card');
