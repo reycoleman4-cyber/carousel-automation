@@ -53,13 +53,11 @@ body {
   line-height: 1.55;
   font-weight: 450;
   min-height: 100vh;
-  /* Subtle grid pattern + top glow */
-  background-image:
-    linear-gradient(rgba(255,255,255,0.028) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.028) 1px, transparent 1px),
-    radial-gradient(ellipse 80% 40% at 50% -10%, rgba(91,143,255,0.10) 0%, transparent 70%);
-  background-size: 48px 48px, 48px 48px, 100% 100%;
+  background-image: url('background.avif');
+  background-size: cover;
+  background-position: center;
   background-attachment: fixed;
+  background-repeat: no-repeat;
 }
 
 .app {
