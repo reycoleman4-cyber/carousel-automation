@@ -52,6 +52,7 @@ function showAppView() {
   if ((window.location.hash || '#/').split('/')[0].replace('#', '') === 'login') {
     window.location.hash = '#/';
   }
+  refreshNotifBadge();
 }
 
 async function checkAuthAndRender() {
@@ -1073,6 +1074,30 @@ function apiProfilesMeUpdate(updates) {
     })
   );
 }
+function apiNotifications() {
+  return getAuthHeaders().then((h) =>
+    fetch(`${API}/api/notifications`, { headers: h }).then((r) => {
+      if (!r.ok) return r.json().then((d) => Promise.reject(new Error(d.error || 'Failed')));
+      return r.json();
+    })
+  );
+}
+function apiNotificationAccept(id) {
+  return getAuthHeaders().then((h) =>
+    fetch(`${API}/api/notifications/${id}/accept`, { method: 'POST', headers: h }).then((r) => {
+      if (!r.ok) return r.json().then((d) => Promise.reject(new Error(d.error || 'Failed')));
+      return r.json();
+    })
+  );
+}
+function apiNotificationDecline(id) {
+  return getAuthHeaders().then((h) =>
+    fetch(`${API}/api/notifications/${id}/decline`, { method: 'POST', headers: h }).then((r) => {
+      if (!r.ok) return r.json().then((d) => Promise.reject(new Error(d.error || 'Failed')));
+      return r.json();
+    })
+  );
+}
 function apiTeam() {
   return getAuthHeaders().then((h) =>
     fetch(`${API}/api/team`, { headers: h }).then((r) => r.json())
@@ -1138,6 +1163,7 @@ function getRoute() {
   }
   if (parts[0] === 'logins') return { view: 'logins' };
   if (parts[0] === 'settings') return { view: 'settings' };
+  if (parts[0] === 'notifications') return { view: 'notifications' };
   if (parts[0] === 'campaigns') {
     if (parts[1]) return { view: 'campaignDetail', campaignId: parts[1] };
     return { view: 'campaigns' };
@@ -1507,6 +1533,8 @@ function setBreadcrumb(route, project, campaign, folderNum) {
     crumbs.push({ label: 'Calendar', current: true });
   } else if (v === 'logins') {
     crumbs.push({ label: 'Logins', current: true });
+  } else if (v === 'notifications') {
+    crumbs.push({ label: 'Notifications', current: true });
   }
   if (!crumbs.length) { el.textContent = ''; return; }
   el.innerHTML = crumbs.map((c, i) => {
@@ -5935,12 +5963,14 @@ function render() {
   projectContentProjectId = null;
   fromRecurringPages = false;
   updateNavActive();
+  refreshNotifBadge();
   const route = getRoute();
   if (route.view === 'dashboard') renderDashboard();
   else if (route.view === 'pages') renderPages();
   else if (route.view === 'recurringPages') renderRecurringPages();
   else if (route.view === 'calendar') renderCalendar();
   else if (route.view === 'logins') renderLogins();
+  else if (route.view === 'notifications') renderNotifications();
   else if (route.view === 'settings') renderSettings();
   else if (route.view === 'campaigns') renderCampaigns();
   else if (route.view === 'campaignDetail') renderCampaignDetail(route.campaignId);
@@ -6080,6 +6110,85 @@ async function populateSettingsPage(main) {
       }
     }
   } catch (_) {}
+}
+
+function updateNotifBadge(count) {
+  const dot = document.getElementById('waffleNotifDot');
+  const badge = document.getElementById('waffleNotifBadge');
+  const n = count || 0;
+  if (dot) dot.hidden = n === 0;
+  if (badge) { badge.hidden = n === 0; badge.textContent = n > 9 ? '9+' : String(n); }
+}
+
+async function refreshNotifBadge() {
+  if (!supabaseClient) return;
+  try {
+    const notifs = await apiNotifications();
+    updateNotifBadge(notifs.length);
+  } catch (_) {}
+}
+
+async function renderNotifications() {
+  setBreadcrumb({ view: 'notifications' });
+  showViewLoading('Loading notifications…');
+  const main = document.getElementById('main');
+  let notifs = [];
+  try { notifs = await apiNotifications(); } catch (_) {}
+  updateNotifBadge(notifs.length);
+  main.innerHTML = `
+    <section class="card">
+      <p class="back-link-wrap"><a href="#/" class="nav-link">← Back to Home</a></p>
+      <h1>Notifications</h1>
+      ${notifs.length === 0
+        ? '<p class="hint">No pending notifications.</p>'
+        : `<ul class="notif-list" id="notifList">${notifs.map((n) => `
+          <li class="notif-item" data-id="${n.id}">
+            <div class="notif-item-info">
+              <div class="notif-item-from">${escapeHtml(n.from.full_name || n.from.username)}</div>
+              <div class="notif-item-sub">@${escapeHtml(n.from.username)} wants to add you to their team</div>
+            </div>
+            <div class="notif-item-actions">
+              <button type="button" class="btn btn-primary btn-sm" data-accept="${n.id}">Accept</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-decline="${n.id}">Decline</button>
+            </div>
+          </li>`).join('')}</ul>`
+      }
+    </section>
+  `;
+  main.querySelectorAll('[data-accept]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.getAttribute('data-accept');
+      btn.disabled = true;
+      try {
+        await apiNotificationAccept(id);
+        btn.closest('.notif-item').remove();
+        const remaining = main.querySelectorAll('.notif-item').length;
+        updateNotifBadge(remaining);
+        if (remaining === 0) main.querySelector('.notif-list')?.replaceWith(Object.assign(document.createElement('p'), { className: 'hint', textContent: 'No pending notifications.' }));
+        showToast('Invitation accepted.', 'success');
+      } catch (err) {
+        showToast(err.message || 'Failed to accept', 'error');
+        btn.disabled = false;
+      }
+    });
+  });
+  main.querySelectorAll('[data-decline]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.getAttribute('data-decline');
+      btn.disabled = true;
+      try {
+        await apiNotificationDecline(id);
+        btn.closest('.notif-item').remove();
+        const remaining = main.querySelectorAll('.notif-item').length;
+        updateNotifBadge(remaining);
+        if (remaining === 0) main.querySelector('.notif-list')?.replaceWith(Object.assign(document.createElement('p'), { className: 'hint', textContent: 'No pending notifications.' }));
+        showToast('Invitation declined.', 'info');
+      } catch (err) {
+        showToast(err.message || 'Failed to decline', 'error');
+        btn.disabled = false;
+      }
+    });
+  });
 }
 
 function renderSettings() {
@@ -6259,11 +6368,16 @@ function renderSettings() {
     if (!username) return;
     errEl.hidden = true;
     try {
-      await apiTeamAdd(username);
+      const result = await apiTeamAdd(username);
       input.value = '';
-      populateSettingsPage(main);
+      if (result && result.invited) {
+        showToast(`Invitation sent to @${result.username}.`, 'success');
+      } else {
+        populateSettingsPage(main);
+        showToast('Team member added.', 'success');
+      }
     } catch (err) {
-      errEl.textContent = err.message || 'Failed to add';
+      errEl.textContent = err.message || 'Failed to send invitation';
       errEl.hidden = false;
     }
   });

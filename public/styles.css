@@ -116,6 +116,21 @@ body::before {
 .waffle-wrap {
   position: relative;
 }
+/* Notification dot on waffle button */
+#navWaffleBtn { position: relative; }
+.waffle-notif-dot { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--error, #ef4444); border: 2px solid var(--bg); }
+.waffle-notif-dot[hidden] { display: none !important; }
+/* Notification badge inside waffle popup item */
+.waffle-notif-item { display: flex; align-items: center; gap: 8px; }
+.notif-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--error, #ef4444); color: #fff; font-size: 0.7rem; font-weight: 700; line-height: 1; }
+.notif-badge[hidden] { display: none !important; }
+/* Notifications view */
+.notif-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.notif-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); flex-wrap: wrap; }
+.notif-item-info { flex: 1; min-width: 0; }
+.notif-item-from { font-weight: 600; color: var(--text); }
+.notif-item-sub { font-size: 0.85rem; color: var(--text-muted); margin-top: 2px; }
+.notif-item-actions { display: flex; gap: 8px; flex-shrink: 0; }
 .nav-waffle-icon {
   display: block;
 }

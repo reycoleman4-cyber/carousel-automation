@@ -104,7 +104,38 @@ CREATE POLICY "Member can view own memberships"
   USING (auth.uid() = member_id);
 
 -- ============================================================
--- 5. Per-user settings (replaces global config.json for multi-user)
+-- 5. Team invitations (pending friend/team requests)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.team_invitations (
+  id         BIGSERIAL PRIMARY KEY,
+  from_id    UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  to_id      UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  status     TEXT NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (from_id, to_id),
+  CHECK (from_id != to_id)
+);
+
+ALTER TABLE public.team_invitations ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Sender can view sent invitations"
+  ON public.team_invitations FOR SELECT
+  USING (auth.uid() = from_id);
+
+CREATE POLICY "Recipient can view received invitations"
+  ON public.team_invitations FOR SELECT
+  USING (auth.uid() = to_id);
+
+CREATE POLICY "Sender can send invitations"
+  ON public.team_invitations FOR INSERT
+  WITH CHECK (auth.uid() = from_id);
+
+CREATE POLICY "Parties can delete invitations"
+  ON public.team_invitations FOR DELETE
+  USING (auth.uid() = from_id OR auth.uid() = to_id);
+
+-- ============================================================
+-- 6. Per-user settings (replaces global config.json for multi-user)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS public.user_settings (
   user_id         UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,

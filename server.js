@@ -4273,17 +4273,69 @@ api.post('/team', async (req, res) => {
   const username = (req.body.username || '').trim();
   if (!username) return res.status(400).json({ error: 'username required' });
   try {
-    const { data: profile } = await supabaseAdmin.from('profiles').select('id').ilike('username', username).maybeSingle();
+    const { data: profile } = await supabaseAdmin.from('profiles').select('id, username').ilike('username', username).maybeSingle();
     if (!profile) return res.status(404).json({ error: 'User not found' });
     if (profile.id === req.user.id) return res.status(400).json({ error: 'You cannot add yourself' });
-    const { error } = await supabaseAdmin.from('team_members').insert({ owner_id: req.user.id, member_id: profile.id });
+    // Check if already on team
+    const { data: existing } = await supabaseAdmin.from('team_members').select('member_id').eq('owner_id', req.user.id).eq('member_id', profile.id).maybeSingle();
+    if (existing) return res.status(409).json({ error: 'Already on your team' });
+    // Send invitation instead of directly adding
+    const { error } = await supabaseAdmin.from('team_invitations').insert({ from_id: req.user.id, to_id: profile.id });
     if (error) {
-      if (error.code === '23505') return res.status(409).json({ error: 'Already on your team' });
+      if (error.code === '23505') return res.status(409).json({ error: 'Invitation already sent' });
       throw error;
     }
-    res.status(201).json({ id: profile.id, username });
+    res.status(201).json({ id: profile.id, username: profile.username, invited: true });
   } catch (e) {
-    res.status(500).json({ error: String(e.message || 'Failed to add team member') });
+    res.status(500).json({ error: String(e.message || 'Failed to send invitation') });
+  }
+});
+
+// --- Notifications (team invitations received) ---
+api.get('/notifications', async (req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Supabase not configured' });
+  if (!req.user) return res.status(401).json({ error: 'Sign in required' });
+  try {
+    const { data: rows, error } = await supabaseAdmin.from('team_invitations').select('id, from_id, created_at').eq('to_id', req.user.id).eq('status', 'pending').order('created_at', { ascending: false });
+    if (error) throw error;
+    const fromIds = (rows || []).map((r) => r.from_id);
+    if (!fromIds.length) return res.json([]);
+    const { data: profiles } = await supabaseAdmin.from('profiles').select('id, username, full_name').in('id', fromIds);
+    const byId = (profiles || []).reduce((acc, p) => { acc[p.id] = p; return acc; }, {});
+    res.json((rows || []).map((r) => ({ id: r.id, from: byId[r.from_id] || { username: 'Unknown', full_name: '' }, created_at: r.created_at })));
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || 'Failed to load notifications') });
+  }
+});
+
+api.post('/notifications/:id/accept', async (req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Supabase not configured' });
+  if (!req.user) return res.status(401).json({ error: 'Sign in required' });
+  const inviteId = parseInt(req.params.id, 10);
+  try {
+    const { data: invite, error: fetchErr } = await supabaseAdmin.from('team_invitations').select('id, from_id, to_id').eq('id', inviteId).eq('to_id', req.user.id).eq('status', 'pending').maybeSingle();
+    if (fetchErr) throw fetchErr;
+    if (!invite) return res.status(404).json({ error: 'Invitation not found' });
+    // Add inviter's account to team (from_id is the owner who sent the invite; to_id is this user who accepted)
+    const { error: teamErr } = await supabaseAdmin.from('team_members').insert({ owner_id: invite.from_id, member_id: invite.to_id });
+    if (teamErr && teamErr.code !== '23505') throw teamErr;
+    // Delete the invitation
+    await supabaseAdmin.from('team_invitations').delete().eq('id', inviteId);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || 'Failed to accept') });
+  }
+});
+
+api.post('/notifications/:id/decline', async (req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Supabase not configured' });
+  if (!req.user) return res.status(401).json({ error: 'Sign in required' });
+  const inviteId = parseInt(req.params.id, 10);
+  try {
+    await supabaseAdmin.from('team_invitations').delete().eq('id', inviteId).eq('to_id', req.user.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || 'Failed to decline') });
   }
 });
 

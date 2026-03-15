@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=11" />
+  <link rel="stylesheet" href="styles.css?v=12" />
 </head>
 <body>
   <div class="app auth-screen" id="appRoot">
@@ -67,8 +67,10 @@
             <div class="waffle-wrap">
               <button type="button" class="btn btn-ghost btn-icon" id="navWaffleBtn" title="Menu" aria-label="Menu" aria-haspopup="true" aria-expanded="false">
                 <svg class="nav-waffle-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="6"/><rect x="15" y="3" width="6" height="6"/><rect x="3" y="15" width="6" height="6"/><rect x="15" y="15" width="6" height="6"/></svg>
+                <span class="waffle-notif-dot" id="waffleNotifDot" hidden aria-hidden="true"></span>
               </button>
               <div class="waffle-popup" id="wafflePopup" hidden role="menu" aria-label="Menu options">
+                <a href="#/notifications" class="waffle-popup-item waffle-notif-item" role="menuitem" id="waffleNotifLink">Notifications <span class="notif-badge" id="waffleNotifBadge" hidden></span></a>
                 <a href="#/calendar" class="waffle-popup-item" role="menuitem">Calendar</a>
                 <a href="#/logins" class="waffle-popup-item" role="menuitem">Logins</a>
                 <a href="#/settings" class="waffle-popup-item" role="menuitem">Settings</a>
@@ -285,6 +287,6 @@
   <!-- Toast notification container -->
   <div class="toast-container" id="toastContainer" aria-live="polite" aria-atomic="false"></div>
 
-  <script src="app.js?v=12"></script>
+  <script src="app.js?v=13"></script>
 </body>
 </html>
