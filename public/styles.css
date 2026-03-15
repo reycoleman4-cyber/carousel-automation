@@ -53,11 +53,19 @@ body {
   line-height: 1.55;
   font-weight: 450;
   min-height: 100vh;
+  position: relative;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
   background-image: url('background.avif?v=2');
   background-size: cover;
   background-position: center;
-  background-attachment: fixed;
-  background-repeat: no-repeat;
+  filter: blur(3px) brightness(0.3);
+  transform: scale(1.04); /* prevent white blur edges */
+  z-index: -1;
 }
 
 .app {
