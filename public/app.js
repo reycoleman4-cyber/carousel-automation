@@ -539,7 +539,7 @@ function _startFactCycle() {
     _factIndex++;
   };
   showFact();
-  _factTimer = setInterval(showFact, 3000);
+  _factTimer = setInterval(showFact, 6000);
 }
 
 function _stopFactCycle() {
