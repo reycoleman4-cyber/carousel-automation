@@ -4410,6 +4410,49 @@ api.delete('/campaigns/:campaignId/members/:memberId', async (req, res) => {
   }
 });
 
+// --- Campaign pages (returns pages belonging to a campaign, works for shared members) ---
+api.get('/campaigns/:campaignId/pages', async (req, res) => {
+  const uid = requireUserId(req, res);
+  if (!uid) return;
+  try {
+    const cid = parseInt(req.params.campaignId, 10);
+    const effectiveUid = await resolveEffectiveUserId(cid, uid);
+    const campaign = getCampaignById(cid, effectiveUid);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    const pageIds = campaign.pageIds && campaign.pageIds.length ? campaign.pageIds : (campaign.projectId != null ? [campaign.projectId] : []);
+    const allProjects = getProjects(effectiveUid);
+    const pages = pageIds.map((id) => allProjects.find((p) => p.id === id)).filter(Boolean).map((p) => {
+      const hasAvatar = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic'].some((ext) =>
+        fsSync.existsSync(path.join(AVATARS_DIR, `${p.id}${ext}`))
+      );
+      return { ...p, hasAvatar: !!hasAvatar };
+    });
+    res.json(pages);
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
+// --- Profile search (for username autocomplete) ---
+api.get('/profiles/search', async (req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Supabase not configured' });
+  if (!req.user) return res.status(401).json({ error: 'Sign in required' });
+  const q = (req.query.q || '').trim().toLowerCase();
+  if (!q || q.length < 1) return res.json([]);
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('profiles')
+      .select('id, username, full_name')
+      .ilike('username', `${q}%`)
+      .neq('id', req.user.id)
+      .limit(8);
+    if (error) throw error;
+    res.json(data || []);
+  } catch (e) {
+    res.status(500).json({ error: String(e.message) });
+  }
+});
+
 // --- Per-user settings (replaces global config for blotato key) ---
 api.get('/settings', async (req, res) => {
   const uid = requireUserId(req, res);

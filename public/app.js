@@ -193,6 +193,92 @@ function showViewLoading(label = 'Loading…') {
   if (main) main.innerHTML = `<div class="view-loading"><div class="spinner"></div><span>${escapeHtml(label)}</span></div>`;
 }
 
+/**
+ * Mount a username search autocomplete on an input.
+ * @param {HTMLInputElement} input - the text input to attach to
+ * @param {function} onSelect - called with the selected profile object {id, username, full_name}
+ */
+function mountUserAutocomplete(input, onSelect) {
+  if (!input) return;
+  const wrap = input.closest('.user-search-wrap') || input.parentElement;
+  let dropdown = null;
+  let debounceTimer = null;
+  let selectedProfile = null;
+
+  function removeDropdown() {
+    if (dropdown) { dropdown.remove(); dropdown = null; }
+  }
+
+  function avatarHtml(profile) {
+    const letter = (profile.full_name || profile.username || '?').charAt(0).toUpperCase();
+    const colors = ['#6366f1','#8b5cf6','#ec4899','#f59e0b','#10b981','#3b82f6'];
+    const color = colors[(profile.username || '').charCodeAt(0) % colors.length];
+    return `<span class="user-autocomplete-avatar" style="background:${color};">${escapeHtml(letter)}</span>`;
+  }
+
+  function showResults(results) {
+    removeDropdown();
+    if (!results.length) return;
+    dropdown = document.createElement('ul');
+    dropdown.className = 'user-autocomplete-dropdown';
+    results.forEach((profile) => {
+      const li = document.createElement('li');
+      li.className = 'user-autocomplete-item';
+      li.innerHTML = `${avatarHtml(profile)}<span class="user-autocomplete-info"><span class="user-autocomplete-name">${escapeHtml(profile.full_name || profile.username)}</span><span class="user-autocomplete-username">@${escapeHtml(profile.username)}</span></span>`;
+      li.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        selectedProfile = profile;
+        input.value = profile.username;
+        input.dataset.selectedId = profile.id;
+        removeDropdown();
+        onSelect(profile);
+      });
+      dropdown.appendChild(li);
+    });
+    // Position below input
+    const rect = input.getBoundingClientRect();
+    wrap.style.position = 'relative';
+    dropdown.style.width = `${input.offsetWidth}px`;
+    wrap.appendChild(dropdown);
+  }
+
+  input.addEventListener('input', () => {
+    selectedProfile = null;
+    delete input.dataset.selectedId;
+    const q = input.value.trim();
+    clearTimeout(debounceTimer);
+    if (!q) { removeDropdown(); return; }
+    debounceTimer = setTimeout(() => {
+      apiProfileSearch(q).then((results) => showResults(results)).catch(() => removeDropdown());
+    }, 250);
+  });
+
+  input.addEventListener('blur', () => {
+    setTimeout(removeDropdown, 150);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (!dropdown) return;
+    const items = dropdown.querySelectorAll('.user-autocomplete-item');
+    const active = dropdown.querySelector('.user-autocomplete-item.is-active');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const next = active ? (active.nextElementSibling || items[0]) : items[0];
+      if (active) active.classList.remove('is-active');
+      if (next) next.classList.add('is-active');
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const prev = active ? (active.previousElementSibling || items[items.length - 1]) : items[items.length - 1];
+      if (active) active.classList.remove('is-active');
+      if (prev) prev.classList.add('is-active');
+    } else if (e.key === 'Enter') {
+      if (active) { e.preventDefault(); active.dispatchEvent(new MouseEvent('mousedown')); }
+    } else if (e.key === 'Escape') {
+      removeDropdown();
+    }
+  });
+}
+
 /** Show an alert in a styled modal (replaces window.alert). Returns a Promise that resolves when dismissed. */
 function showAlert(message) {
   return new Promise((resolve) => {
@@ -1072,6 +1158,14 @@ function apiProfilesMeUpdate(updates) {
       if (!r.ok) return r.json().then((d) => Promise.reject(new Error(d.error || 'Failed')));
       return r.json();
     })
+  );
+}
+function apiCampaignPages(campaignId) {
+  return apiWithAuth(`${API}/api/campaigns/${campaignId}/pages`).then((r) => r.json());
+}
+function apiProfileSearch(q) {
+  return getAuthHeaders().then((h) =>
+    fetch(`${API}/api/profiles/search?q=${encodeURIComponent(q)}`, { headers: h }).then((r) => r.json())
   );
 }
 function apiNotifications() {
@@ -4197,20 +4291,17 @@ function renderCampaigns() {
 function renderCampaignDetail(campaignId) {
   const cid = campaignId;
   return Promise.all([
-    apiProjects(),
     apiAllCampaigns(),
     apiDeployedPostsCount(campaignId).catch(() => ({ count: 0, byPage: {} })),
     apiTrends(cid).catch(() => []),
-  ]).then(([projects, campaigns, countData, campaignTrends]) => {
+    apiCampaignPages(cid).catch(() => []),
+  ]).then(([campaigns, countData, campaignTrends, pages]) => {
     let campaign = campaigns.find((c) => String(c.id) === String(cid));
     if (!campaign) {
       document.getElementById('main').innerHTML = '<section class="card"><p class="back-link-wrap back-link-wrap-centered"><a href="#/campaigns" class="nav-link">← Back to campaigns</a></p><p>Campaign not found.</p></section>';
       setBreadcrumb({ view: 'campaignDetail', campaignId: cid });
       return;
     }
-    const getPageIds = (c) => (c.pageIds && c.pageIds.length) ? c.pageIds : (c.projectId != null ? [c.projectId] : []);
-    const pageIds = getPageIds(campaign);
-    const pages = pageIds.map((id) => projects.find((p) => p.id === id)).filter(Boolean);
     setBreadcrumb({ view: 'campaignDetail', campaignId: cid });
     const main = document.getElementById('main');
     const campaignAvatarEl = `<div class="campaign-detail-avatar-wrap"><div class="campaign-avatar-clickable" id="campaignDetailAvatarClickable" title="Click to change image"><div class="campaign-avatar campaign-avatar-square"><img src="${campaignAvatarUrl(cid)}" alt="" class="campaign-avatar-img" id="campaignDetailAvatar" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" id="campaignDetailAvatarPlaceholder" style="display:none;">${(campaign.name || 'C').charAt(0).toUpperCase()}</span></div></div><input type="file" accept="image/*" id="campaignDetailAvatarInput" hidden /></div>`;
@@ -4265,8 +4356,10 @@ function renderCampaignDetail(campaignId) {
           <h3 class="settings-subtitle">Team members</h3>
           <p class="hint">Add people by username so they can access this campaign.</p>
           <div class="settings-team-add">
-            <input type="text" id="campaignTeamUsername" placeholder="Username" class="settings-team-input" />
-            <button type="button" class="btn btn-secondary" id="campaignTeamAddBtn">Add</button>
+            <div class="user-search-wrap" style="flex:1;">
+              <input type="text" id="campaignTeamUsername" placeholder="Search by username…" class="settings-team-input" autocomplete="off" />
+            </div>
+            <button type="button" class="btn btn-secondary" id="campaignTeamAddBtn" disabled>Add</button>
           </div>
           <p id="campaignTeamError" class="auth-error" hidden></p>
           <ul id="campaignTeamList" class="settings-team-list"></ul>
@@ -4377,7 +4470,8 @@ function renderCampaignDetail(campaignId) {
           showConfirm(`Are you sure you want to remove "${pageName}" from the campaign?`).then((ok) => {
             if (!ok) return;
             const removeId = parseInt(btn.dataset.pageId, 10);
-            const newPageIds = pageIds.filter((id) => id !== removeId);
+            const currentPageIds = (campaign.pageIds && campaign.pageIds.length) ? campaign.pageIds : (campaign.projectId != null ? [campaign.projectId] : []);
+            const newPageIds = currentPageIds.filter((id) => id !== removeId);
             if (newPageIds.length === 0) { showAlert('Campaign must have at least one page.'); return; }
             apiUpdateCampaignPages(cid, newPageIds).then(() => renderCampaignDetail(cid)).catch((err) => showAlert(err.message || 'Failed'));
           });
@@ -4518,7 +4612,7 @@ function renderCampaignDetail(campaignId) {
       const endInput = document.getElementById('campaignEndDateInput');
       const startVal = startInput?.value?.trim() || null;
       const endVal = endInput?.value?.trim() || null;
-      apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, campaignStartDate: startVal, campaignEndDate: endVal, memberUsernames: campaign.memberUsernames || [], notes: campaign.notes ?? '' }) })
+      apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds: campaign.pageIds || [], releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, campaignStartDate: startVal, campaignEndDate: endVal, memberUsernames: campaign.memberUsernames || [], notes: campaign.notes ?? '' }) })
         .then((r) => { if (!r.ok) throw new Error('Save failed'); return r.json(); })
         .then((c) => {
           campaign = c;
@@ -4572,9 +4666,12 @@ function renderCampaignDetail(campaignId) {
       };
     }
     document.getElementById('addPageToCampaignBtn').onclick = () => {
-      const available = projects.filter((p) => !pageIds.includes(p.id));
-      if (!available.length) { showAlert('All pages are already in this campaign.'); return; }
-      openAddPageModal(cid, pageIds, available, () => renderCampaignDetail(cid));
+      apiProjects().then((ownProjects) => {
+        const pageIds = (campaign.pageIds && campaign.pageIds.length) ? campaign.pageIds : (campaign.projectId != null ? [campaign.projectId] : []);
+        const available = ownProjects.filter((p) => !pageIds.includes(p.id));
+        if (!available.length) { showAlert('All pages are already in this campaign.'); return; }
+        openAddPageModal(cid, pageIds, available, () => renderCampaignDetail(cid));
+      }).catch(() => showAlert('Failed to load pages'));
     };
 
     // Campaign members (real API — owner can add/remove, members are shown to all)
@@ -4599,17 +4696,31 @@ function renderCampaignDetail(campaignId) {
       }
     }
     refreshCampaignMembers();
+    if (!isSharedCampaign && campaignTeamUsername) {
+      mountUserAutocomplete(campaignTeamUsername, () => {
+        if (campaignTeamAddBtn) campaignTeamAddBtn.disabled = false;
+      });
+      campaignTeamUsername.addEventListener('input', () => {
+        if (campaignTeamAddBtn) campaignTeamAddBtn.disabled = !campaignTeamUsername.dataset.selectedId;
+      });
+    }
     if (!isSharedCampaign && campaignTeamAddBtn && campaignTeamUsername) {
       campaignTeamAddBtn.onclick = async () => {
         const username = campaignTeamUsername.value.trim();
-        if (!username) return;
+        if (!username || !campaignTeamUsername.dataset.selectedId) {
+          if (campaignTeamError) { campaignTeamError.textContent = 'Please select an account from the suggestions.'; campaignTeamError.hidden = false; }
+          return;
+        }
         if (campaignTeamError) campaignTeamError.hidden = true;
         try {
           const r = await apiWithAuth(`${API}/api/campaigns/${cid}/members`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username }) });
           const d = await r.json();
           if (!r.ok) throw new Error(d.error || 'Failed to add member');
           campaignTeamUsername.value = '';
+          delete campaignTeamUsername.dataset.selectedId;
+          campaignTeamAddBtn.disabled = true;
           refreshCampaignMembers();
+          showToast(`@${username} added to campaign.`, 'success');
         } catch (err) {
           if (campaignTeamError) { campaignTeamError.textContent = err.message || 'Failed'; campaignTeamError.hidden = false; }
         }
@@ -6237,8 +6348,10 @@ function renderSettings() {
         <h3 class="settings-subtitle">Team members</h3>
         <p class="hint">Add people by their username to give them access to your account.</p>
         <div class="settings-team-add">
-          <input type="text" id="settingsTeamUsername" placeholder="Username" class="settings-team-input" />
-          <button type="button" class="btn btn-secondary" id="settingsTeamAddBtn">Add</button>
+          <div class="user-search-wrap" style="flex:1;">
+            <input type="text" id="settingsTeamUsername" placeholder="Search by username…" class="settings-team-input" autocomplete="off" />
+          </div>
+          <button type="button" class="btn btn-secondary" id="settingsTeamAddBtn" disabled>Add</button>
         </div>
         <p id="settingsTeamError" class="auth-error" hidden></p>
         <ul id="settingsTeamList" class="settings-team-list"></ul>
@@ -6360,16 +6473,32 @@ function renderSettings() {
       if (errEl) { errEl.textContent = err.message || 'Failed to save display name'; errEl.hidden = false; }
     }
   });
-  main.querySelector('#settingsTeamAddBtn')?.addEventListener('click', async () => {
+  const settingsTeamInput = main.querySelector('#settingsTeamUsername');
+  const settingsTeamAddBtn = main.querySelector('#settingsTeamAddBtn');
+  mountUserAutocomplete(settingsTeamInput, (profile) => {
+    if (settingsTeamAddBtn) settingsTeamAddBtn.disabled = false;
+  });
+  if (settingsTeamInput) {
+    settingsTeamInput.addEventListener('input', () => {
+      if (settingsTeamAddBtn) settingsTeamAddBtn.disabled = !settingsTeamInput.dataset.selectedId;
+    });
+  }
+  settingsTeamAddBtn?.addEventListener('click', async () => {
     const input = main.querySelector('#settingsTeamUsername');
     const errEl = main.querySelector('#settingsTeamError');
     if (!input || !errEl) return;
     const username = input.value.trim();
-    if (!username) return;
+    if (!username || !input.dataset.selectedId) {
+      errEl.textContent = 'Please select an account from the suggestions.';
+      errEl.hidden = false;
+      return;
+    }
     errEl.hidden = true;
     try {
       const result = await apiTeamAdd(username);
       input.value = '';
+      delete input.dataset.selectedId;
+      settingsTeamAddBtn.disabled = true;
       if (result && result.invited) {
         showToast(`Invitation sent to @${result.username}.`, 'success');
       } else {
