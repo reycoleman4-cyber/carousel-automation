@@ -1053,6 +1053,26 @@ function apiProfileLookup(username) {
     })
   );
 }
+function apiProfilesMe() {
+  return getAuthHeaders().then((h) =>
+    fetch(`${API}/api/profiles/me`, { headers: h }).then((r) => {
+      if (!r.ok) return r.json().then((d) => Promise.reject(new Error(d.error || 'Failed')));
+      return r.json();
+    })
+  );
+}
+function apiProfilesMeUpdate(updates) {
+  return getAuthHeaders().then((h) =>
+    fetch(`${API}/api/profiles/me`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...h },
+      body: JSON.stringify(updates),
+    }).then((r) => {
+      if (!r.ok) return r.json().then((d) => Promise.reject(new Error(d.error || 'Failed')));
+      return r.json();
+    })
+  );
+}
 function apiTeam() {
   return getAuthHeaders().then((h) =>
     fetch(`${API}/api/team`, { headers: h }).then((r) => r.json())
@@ -6028,10 +6048,22 @@ async function populateSettingsPage(main) {
     const settingsUsernameError = main.querySelector('#settingsUsernameError');
     if (usernameEditWrap) usernameEditWrap.hidden = true;
     if (settingsUsernameError) settingsUsernameError.hidden = true;
+    const displayNameEditWrap = main.querySelector('#settingsDisplayNameEditWrap');
+    if (displayNameEditWrap) displayNameEditWrap.hidden = true;
     if (supabaseClient && usernameEl) {
-      const { data: profile } = await supabaseClient.from('profiles').select('username').maybeSingle();
-      usernameEl.textContent = profile?.username || '—';
-      if (settingsUsernameInput) settingsUsernameInput.value = profile?.username || '';
+      try {
+        const profile = await apiProfilesMe();
+        usernameEl.textContent = profile.username || '—';
+        if (settingsUsernameInput) settingsUsernameInput.value = profile.username || '';
+        const displayNameEl = main.querySelector('#settingsDisplayName');
+        const displayNameInput = main.querySelector('#settingsDisplayNameInput');
+        if (displayNameEl) displayNameEl.textContent = profile.full_name || '—';
+        if (displayNameInput) displayNameInput.value = profile.full_name || '';
+        const emailEl = main.querySelector('#settingsEmail');
+        if (emailEl) emailEl.textContent = profile.email || '';
+      } catch (_) {
+        usernameEl.textContent = '—';
+      }
     }
     if (teamListEl && supabaseClient) {
       teamListEl.innerHTML = '';
@@ -6058,20 +6090,39 @@ function renderSettings() {
       <p class="back-link-wrap"><a href="#/" class="nav-link">← Back to Home</a></p>
       <h1>Settings</h1>
       <div id="settingsProfileSection" class="settings-section">
-        <h3 class="settings-subtitle">Your username</h3>
-        <div class="settings-username-row">
-          <span id="settingsUsername" class="settings-username"></span>
-          <button type="button" class="btn btn-secondary btn-sm" id="settingsUsernameEdit">Edit</button>
-        </div>
-        <div id="settingsUsernameEditWrap" class="settings-username-edit-wrap" hidden>
-          <input type="text" id="settingsUsernameInput" placeholder="Username" class="settings-team-input" maxlength="50" />
-          <div class="settings-username-edit-actions">
-            <button type="button" class="btn btn-primary" id="settingsUsernameSave">Save</button>
-            <button type="button" class="btn btn-ghost" id="settingsUsernameCancel">Cancel</button>
+        <h3 class="settings-subtitle">Your profile</h3>
+        <p class="hint" style="margin-bottom:0.75rem;">Email: <span id="settingsEmail" style="font-weight:500;"></span></p>
+        <div class="settings-profile-field">
+          <label class="settings-profile-label">Display name</label>
+          <div class="settings-username-row">
+            <span id="settingsDisplayName" class="settings-username"></span>
+            <button type="button" class="btn btn-secondary btn-sm" id="settingsDisplayNameEdit">Edit</button>
           </div>
-          <p id="settingsUsernameError" class="auth-error" hidden></p>
+          <div id="settingsDisplayNameEditWrap" class="settings-username-edit-wrap" hidden>
+            <input type="text" id="settingsDisplayNameInput" placeholder="Your name" class="settings-team-input" maxlength="80" />
+            <div class="settings-username-edit-actions">
+              <button type="button" class="btn btn-primary" id="settingsDisplayNameSave">Save</button>
+              <button type="button" class="btn btn-ghost" id="settingsDisplayNameCancel">Cancel</button>
+            </div>
+            <p id="settingsDisplayNameError" class="auth-error" hidden></p>
+          </div>
         </div>
-        <p class="hint">Share this username so others can add you as a team member or to a campaign.</p>
+        <div class="settings-profile-field" style="margin-top:0.75rem;">
+          <label class="settings-profile-label">Username</label>
+          <div class="settings-username-row">
+            <span id="settingsUsername" class="settings-username"></span>
+            <button type="button" class="btn btn-secondary btn-sm" id="settingsUsernameEdit">Edit</button>
+          </div>
+          <div id="settingsUsernameEditWrap" class="settings-username-edit-wrap" hidden>
+            <input type="text" id="settingsUsernameInput" placeholder="Username" class="settings-team-input" maxlength="50" />
+            <div class="settings-username-edit-actions">
+              <button type="button" class="btn btn-primary" id="settingsUsernameSave">Save</button>
+              <button type="button" class="btn btn-ghost" id="settingsUsernameCancel">Cancel</button>
+            </div>
+            <p id="settingsUsernameError" class="auth-error" hidden></p>
+          </div>
+          <p class="hint" style="margin-top:0.5rem;">Share this username so others can add you as a team member or to a campaign.</p>
+        </div>
       </div>
       <div id="settingsTeamSection" class="settings-section">
         <h3 class="settings-subtitle">Team members</h3>
@@ -6153,17 +6204,51 @@ function renderSettings() {
     }
     if (errEl) errEl.hidden = true;
     try {
-      const { data: { user } } = await supabaseClient.auth.getUser();
-      if (!user) throw new Error('Not signed in');
-      const { data, error } = await supabaseClient.from('profiles').update({ username, updated_at: new Date().toISOString() }).eq('id', user.id).select('username').maybeSingle();
-      if (error) throw error;
-      if (display) display.textContent = (data && data.username) ? data.username : username;
+      const profile = await apiProfilesMeUpdate({ username });
+      if (display) display.textContent = profile.username || username;
       wrap.hidden = true;
+      showToast('Username saved.', 'success');
     } catch (err) {
       if (errEl) {
-        errEl.textContent = err.message?.includes('unique') || err.code === '23505' ? 'That username is already taken.' : (err.message || 'Failed to update username');
+        errEl.textContent = err.message?.includes('unique') || err.message?.includes('already') ? 'That username is already taken.' : (err.message || 'Failed to update username');
         errEl.hidden = false;
       }
+    }
+  });
+  main.querySelector('#settingsDisplayNameEdit')?.addEventListener('click', () => {
+    const wrap = main.querySelector('#settingsDisplayNameEditWrap');
+    const display = main.querySelector('#settingsDisplayName');
+    const input = main.querySelector('#settingsDisplayNameInput');
+    const errEl = main.querySelector('#settingsDisplayNameError');
+    if (wrap && input) {
+      if (errEl) errEl.hidden = true;
+      const cur = (display?.textContent || '').trim();
+      input.value = cur === '—' ? '' : cur;
+      wrap.hidden = false;
+      input.focus();
+    }
+  });
+  main.querySelector('#settingsDisplayNameCancel')?.addEventListener('click', () => {
+    const wrap = main.querySelector('#settingsDisplayNameEditWrap');
+    const errEl = main.querySelector('#settingsDisplayNameError');
+    if (wrap) wrap.hidden = true;
+    if (errEl) errEl.hidden = true;
+  });
+  main.querySelector('#settingsDisplayNameSave')?.addEventListener('click', async () => {
+    const input = main.querySelector('#settingsDisplayNameInput');
+    const display = main.querySelector('#settingsDisplayName');
+    const wrap = main.querySelector('#settingsDisplayNameEditWrap');
+    const errEl = main.querySelector('#settingsDisplayNameError');
+    if (!input || !display || !wrap) return;
+    const full_name = (input.value || '').trim();
+    if (errEl) errEl.hidden = true;
+    try {
+      const profile = await apiProfilesMeUpdate({ full_name });
+      if (display) display.textContent = profile.full_name || '—';
+      wrap.hidden = true;
+      showToast('Display name saved.', 'success');
+    } catch (err) {
+      if (errEl) { errEl.textContent = err.message || 'Failed to save display name'; errEl.hidden = false; }
     }
   });
   main.querySelector('#settingsTeamAddBtn')?.addEventListener('click', async () => {

@@ -4225,7 +4225,7 @@ api.put('/profiles/me', async (req, res) => {
   if (!Object.keys(updates).length) return res.status(400).json({ error: 'Nothing to update' });
   updates.updated_at = new Date().toISOString();
   try {
-    const { error } = await supabaseAdmin.from('profiles').update(updates).eq('id', req.user.id);
+    const { error } = await supabaseAdmin.from('profiles').upsert({ id: req.user.id, ...updates }, { onConflict: 'id' });
     if (error) throw error;
     const { data } = await supabaseAdmin.from('profiles').select('id, username, full_name').eq('id', req.user.id).maybeSingle();
     res.json({ id: req.user.id, email: req.user.email, username: data?.username || '', full_name: data?.full_name || '' });

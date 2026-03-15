@@ -1146,6 +1146,8 @@ body::before {
 /* Settings */
 .settings-section { margin-bottom: 24px; }
 .settings-subtitle { margin: 0 0 8px 0; font-size: 1rem; font-weight: 600; color: var(--text); }
+.settings-profile-field { padding-bottom: 8px; }
+.settings-profile-label { display: block; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 4px; }
 .settings-username { margin: 0; font-size: 1.1rem; font-weight: 500; }
 .settings-username-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
 .settings-username-edit-wrap { margin-top: 8px; margin-bottom: 8px; }
