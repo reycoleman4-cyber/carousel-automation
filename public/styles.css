@@ -63,7 +63,7 @@ body::before {
   background-image: url('background.avif?v=2');
   background-size: cover;
   background-position: center;
-  filter: blur(3px) brightness(0.3);
+  filter: blur(3px) brightness(0.5);
   transform: scale(1.04); /* prevent white blur edges */
   z-index: -1;
 }
