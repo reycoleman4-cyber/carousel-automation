@@ -3401,6 +3401,7 @@ api.get('/calendar', async (req, res) => {
       const key = `${it.projectId}|${it.campaignId}|${it.postTypeId || 'default'}|${it.scheduledAt}`;
       const o = outcomeByKey[key];
       it.postStatus = o ? o.status : null;
+      it.postError = o ? (o.error || null) : null;
     }
 
     res.json({ items, timezone: TZ, timezoneLabel: getScheduleTimezoneLabel(), todo: [...recurringTodo, ...campaignGapTodo], recurringTodo, campaignGapTodo });

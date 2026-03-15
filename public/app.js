@@ -170,6 +170,28 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+/** Show a non-blocking toast notification. type: 'success' | 'error' | 'info' */
+function showToast(message, type = 'info', duration = 3000) {
+  const container = document.getElementById('toastContainer');
+  if (!container) return;
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = String(message ?? '');
+  container.appendChild(toast);
+  const remove = () => {
+    toast.classList.add('toast-out');
+    toast.addEventListener('animationend', () => toast.remove(), { once: true });
+  };
+  const timer = setTimeout(remove, duration);
+  toast.addEventListener('click', () => { clearTimeout(timer); remove(); });
+}
+
+/** Show a centered loading spinner in the main content area */
+function showViewLoading(label = 'Loading…') {
+  const main = document.getElementById('main');
+  if (main) main.innerHTML = `<div class="view-loading"><div class="spinner"></div><span>${escapeHtml(label)}</span></div>`;
+}
+
 /** Show an alert in a styled modal (replaces window.alert). Returns a Promise that resolves when dismissed. */
 function showAlert(message) {
   return new Promise((resolve) => {
@@ -1271,7 +1293,50 @@ function convertTimeToServer(userTz, serverTz, timeStr) {
 
 function setBreadcrumb(route, project, campaign, folderNum) {
   const el = document.getElementById('breadcrumb');
-  if (el) el.textContent = '';
+  if (!el) return;
+  const crumbs = [];
+  const v = route && route.view;
+  if (v === 'dashboard') {
+    crumbs.push({ label: 'Home', current: true });
+  } else if (v === 'pages') {
+    crumbs.push({ label: 'Pages', current: true });
+  } else if (v === 'campaigns') {
+    crumbs.push({ label: 'Campaigns', current: true });
+  } else if (v === 'campaignDetail') {
+    crumbs.push({ label: 'Campaigns', href: '#/campaigns' });
+    crumbs.push({ label: campaign ? escapeHtml(campaign.name || 'Campaign') : 'Campaign', current: true });
+  } else if (v === 'recurringPages') {
+    crumbs.push({ label: 'Recurring Pages', current: true });
+  } else if (v === 'project') {
+    crumbs.push({ label: 'Pages', href: '#/pages' });
+    crumbs.push({ label: project ? escapeHtml(project.name || 'Page') : 'Page', current: true });
+  } else if (v === 'campaign') {
+    crumbs.push({ label: 'Campaigns', href: '#/campaigns' });
+    if (campaign) crumbs.push({ label: escapeHtml(campaign.name || 'Campaign'), href: `#/campaigns/${campaign.id}` });
+    crumbs.push({ label: project ? escapeHtml(project.name || 'Page') : 'Page', current: true });
+  } else if (v === 'campaignFolder' || v === 'campaignFolderPhotos') {
+    crumbs.push({ label: 'Campaigns', href: '#/campaigns' });
+    if (campaign) crumbs.push({ label: escapeHtml(campaign.name || 'Campaign'), href: `#/campaigns/${campaign.id}` });
+    if (project) crumbs.push({ label: escapeHtml(project.name || 'Page'), href: `#/campaigns/${campaign ? campaign.id : ''}/${project.id}` });
+    if (folderNum != null) crumbs.push({ label: `Folder ${folderNum}`, current: true });
+  } else if (v === 'trends') {
+    crumbs.push({ label: 'Trends', current: true });
+  } else if (v === 'trendNew') {
+    crumbs.push({ label: 'Trends', href: '#/trends' });
+    crumbs.push({ label: 'New Trend', current: true });
+  } else if (v === 'trendDetail') {
+    crumbs.push({ label: 'Trends', href: '#/trends' });
+    crumbs.push({ label: campaign ? escapeHtml(campaign.name || 'Trend') : 'Trend', current: true });
+  } else if (v === 'calendar') {
+    crumbs.push({ label: 'Calendar', current: true });
+  } else if (v === 'logins') {
+    crumbs.push({ label: 'Logins', current: true });
+  }
+  if (!crumbs.length) { el.textContent = ''; return; }
+  el.innerHTML = crumbs.map((c, i) => {
+    if (c.current) return `<span class="breadcrumb-current">${c.label}</span>`;
+    return `<a class="breadcrumb-link" href="${c.href || '#'}">${c.label}</a>${i < crumbs.length - 1 ? '<span class="breadcrumb-sep">›</span>' : ''}`;
+  }).join('<span class="breadcrumb-sep">›</span>');
 }
 
 const PAGE_SECTIONS = ['AI Influencers', 'UGC Pages', 'Fan Pages', 'Genre Pages'];
@@ -1294,153 +1359,139 @@ const AVAILABLE_FONTS = [
 // --- Views ---
 function renderDashboard() {
   setBreadcrumb({ view: 'dashboard' });
-  Promise.all([apiAllCampaigns()]).then(([campaigns]) => {
+  showViewLoading();
+  Promise.all([
+    apiWithAuth(`${API}/api/calendar?_=${Date.now()}`).then((r) => r.json()).catch(() => ({ items: [] })),
+    apiAllCampaigns().catch(() => []),
+  ]).then(([calData, allCampaigns]) => {
     const main = document.getElementById('main');
-    const timeFrames = [
-      { id: '24h', label: '24 hours' },
-      { id: '7d', label: '7 days' },
-      { id: '30d', label: '30 days' },
-      { id: '6mo', label: '6 months' },
-      { id: '1y', label: '1 year' },
-      { id: 'all', label: 'All time' },
-    ];
-    const campaignsList = Array.isArray(campaigns) ? campaigns : [];
-    const scopeOptions = '<option value="">All pages</option>' + campaignsList.map((c) => `<option value="${escapeHtml(String(c.id))}">${escapeHtml(c.name || 'Campaign ' + c.id)}</option>`).join('');
-    let selectedChartMetric = 'views';
-    const chartMetricLabels = { views: 'Views over time', followers: 'Followers over time', likes: 'Likes over time', comments: 'Comments over time', shares: 'Shares over time' };
+    const items = calData.items || [];
+    const now = new Date();
+    const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+    // Week range (Mon–Sun containing today)
+    const dayOfWeek = now.getDay(); // 0=Sun
+    const weekStart = new Date(now);
+    weekStart.setDate(now.getDate() - ((dayOfWeek + 6) % 7));
+    weekStart.setHours(0, 0, 0, 0);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 7);
+
+    // Filter to items that have a resolved outcome (posted)
+    const postedItems = items.filter((it) => it.postStatus === 'success' || it.postStatus === 'failure');
+    const weekPosted = postedItems.filter((it) => {
+      const d = new Date(it.scheduledAt || (it.date + 'T12:00:00Z'));
+      return d >= weekStart && d < weekEnd;
+    });
+    const weekSuccess = weekPosted.filter((it) => it.postStatus === 'success').length;
+    const successRate = weekPosted.length > 0 ? Math.round((weekSuccess / weekPosted.length) * 100) : null;
+
+    // Pages active this week (distinct projectIds with at least 1 post this week)
+    const pagesThisWeek = new Set(weekPosted.map((it) => it.projectId)).size;
+
+    // Upcoming today (not yet posted)
+    const todayItems = items.filter((it) => {
+      const dateKey = it.scheduledAt ? it.scheduledAt.slice(0, 10) : (it.date || '');
+      return dateKey === todayKey && it.postStatus == null;
+    }).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+
+    // Recent failures (last 48h)
+    const cutoff48h = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+    const recentFailures = postedItems.filter((it) => {
+      const d = new Date(it.scheduledAt || (it.date + 'T12:00:00Z'));
+      return it.postStatus === 'failure' && d >= cutoff48h;
+    }).sort((a, b) => (b.scheduledAt || b.date || '').localeCompare(a.scheduledAt || a.date || ''));
+
+    // Campaigns currently active (within date range)
+    const todayStr = todayKey;
+    const campaigns = Array.isArray(allCampaigns) ? allCampaigns : [];
+    const activeCampaigns = campaigns.filter((c) => {
+      if (c.paused) return false;
+      const start = c.startDate || c.releaseDate || '';
+      const end = c.endDate || '';
+      if (!start && !end) return false;
+      if (start && todayStr < start) return false;
+      if (end && todayStr > end) return false;
+      return true;
+    });
+
+    const fmtTime = (it) => {
+      if (it.scheduledAt) {
+        const d = new Date(it.scheduledAt);
+        return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+      }
+      return formatTimeAMPM(it.time);
+    };
+
+    const todayHtml = todayItems.length
+      ? todayItems.map((it) => `<li class="dashboard-event-item"><span class="dashboard-event-time">${escapeHtml(fmtTime(it))}</span><span class="dashboard-event-name">${escapeHtml(it.projectName || '')}</span><span class="dashboard-event-campaign">${escapeHtml(it.campaignName || '')}</span></li>`).join('')
+      : '<li class="dashboard-empty">No posts scheduled for today.</li>';
+
+    const failuresHtml = recentFailures.length
+      ? recentFailures.slice(0, 5).map((it) => {
+        const d = new Date(it.scheduledAt || (it.date + 'T12:00:00Z'));
+        const timeAgo = (() => {
+          const diff = Math.round((now - d) / 60000);
+          if (diff < 60) return `${diff}m ago`;
+          return `${Math.round(diff / 60)}h ago`;
+        })();
+        return `<li class="dashboard-event-item is-failure">
+          <span class="dashboard-event-time">${escapeHtml(timeAgo)}</span>
+          <div><span class="dashboard-event-name">${escapeHtml(it.projectName || '')} · ${escapeHtml(it.campaignName || '')}</span>${it.postError ? `<div class="dashboard-event-error">${escapeHtml(it.postError)}</div>` : ''}</div>
+        </li>`;
+      }).join('')
+      : '<li class="dashboard-empty">No failures in the last 48 hours.</li>';
+
+    const activeCampaignsHtml = activeCampaigns.length
+      ? activeCampaigns.map((c) => `<li class="dashboard-event-item is-success"><span class="dashboard-event-name">${escapeHtml(c.name || 'Campaign')}</span></li>`).join('')
+      : '<li class="dashboard-empty">No campaigns currently active.</li>';
+
     main.innerHTML = `
-      <section class="card analytics-card">
-        <h1 class="dashboard-title">Analytics</h1>
-        <p class="hint analytics-hint">TikTok metrics across your pages. Data will appear here once the TikTok API is connected. This is a mock UI.</p>
-        <div class="analytics-controls">
-          <div class="analytics-control-group">
-            <label class="field">
-              <span>Time frame</span>
-              <select id="analyticsTimeFrame" class="field-select">
-                ${timeFrames.map((t) => `<option value="${t.id}">${escapeHtml(t.label)}</option>`).join('')}
-              </select>
-            </label>
+      <section class="card">
+        <h1 class="dashboard-title">Overview</h1>
+        <div class="dashboard-stats-grid">
+          <div class="dashboard-stat">
+            <div class="dashboard-stat-value">${weekPosted.length}</div>
+            <div class="dashboard-stat-label">Posts this week</div>
           </div>
-          <div class="analytics-control-group">
-            <label class="field">
-              <span>Scope</span>
-              <select id="analyticsScope" class="field-select">
-                ${scopeOptions}
-              </select>
-            </label>
-            <p class="hint">All pages = combined metrics. Select a campaign to see metrics for posts affiliated with that campaign only.</p>
+          <div class="dashboard-stat">
+            <div class="dashboard-stat-value">${successRate !== null ? successRate + '%' : '—'}</div>
+            <div class="dashboard-stat-label">Success rate (7d)</div>
+          </div>
+          <div class="dashboard-stat">
+            <div class="dashboard-stat-value">${pagesThisWeek}</div>
+            <div class="dashboard-stat-label">Pages active this week</div>
+          </div>
+          <div class="dashboard-stat">
+            <div class="dashboard-stat-value">${activeCampaigns.length}</div>
+            <div class="dashboard-stat-label">Campaigns running</div>
           </div>
         </div>
-        <div class="analytics-chart-wrap" id="analyticsChartWrap">
-          <h2 class="analytics-chart-title" id="analyticsChartTitle">Views over time</h2>
-          <div class="analytics-chart-inner">
-            <svg class="analytics-line-chart" id="analyticsLineChart" viewBox="0 0 400 180" preserveAspectRatio="none">
-              <defs>
-                <linearGradient id="analyticsChartGradient" x1="0" y1="1" x2="0" y2="0">
-                  <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.15"/>
-                  <stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/>
-                </linearGradient>
-              </defs>
-              <path id="analyticsChartArea" fill="url(#analyticsChartGradient)" stroke="none"/>
-              <polyline id="analyticsChartLine" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </div>
-          <div class="analytics-chart-labels" id="analyticsChartLabels"></div>
+
+        <div class="dashboard-section">
+          <h2>Upcoming today</h2>
+          <ul class="dashboard-event-list">${todayHtml}</ul>
         </div>
-        <div class="analytics-metrics" id="analyticsMetrics">
-          <button type="button" class="analytics-metric analytics-metric-btn analytics-metric-selected" data-chart-metric="views" id="analyticsMetricViews">
-            <span class="analytics-metric-value" id="analyticsViews">—</span>
-            <span class="analytics-metric-label">Total views</span>
-          </button>
-          <button type="button" class="analytics-metric analytics-metric-btn" data-chart-metric="followers" id="analyticsMetricFollowers">
-            <span class="analytics-metric-value" id="analyticsFollowers">—</span>
-            <span class="analytics-metric-label">Total followers</span>
-          </button>
-          <button type="button" class="analytics-metric analytics-metric-btn" data-chart-metric="likes" id="analyticsMetricLikes">
-            <span class="analytics-metric-value" id="analyticsLikes">—</span>
-            <span class="analytics-metric-label">Total likes</span>
-          </button>
-          <button type="button" class="analytics-metric analytics-metric-btn" data-chart-metric="comments" id="analyticsMetricComments">
-            <span class="analytics-metric-value" id="analyticsComments">—</span>
-            <span class="analytics-metric-label">Total comments</span>
-          </button>
-          <button type="button" class="analytics-metric analytics-metric-btn" data-chart-metric="shares" id="analyticsMetricShares">
-            <span class="analytics-metric-value" id="analyticsShares">—</span>
-            <span class="analytics-metric-label">Total shares</span>
-          </button>
+
+        <div class="dashboard-section">
+          <h2>Recent failures <span style="font-weight:400;font-size:13px;color:var(--text-muted)">(last 48h)</span></h2>
+          <ul class="dashboard-event-list">${failuresHtml}</ul>
         </div>
-        <p class="hint analytics-mock-note" id="analyticsScopeLabel">Showing mock data for all pages.</p>
+
+        <div class="dashboard-section">
+          <h2>Active campaigns</h2>
+          <ul class="dashboard-event-list">${activeCampaignsHtml}</ul>
+        </div>
+
+        <p class="hint" style="margin-top:24px;">TikTok analytics (views, followers, likes) will appear here once the TikTok API is connected.</p>
       </section>
     `;
-    function formatMockValue() {
-      return '—';
-    }
-    function getMockChartPoints(metric) {
-      const count = 12;
-      const points = [];
-      const seed = (metric || 'views').split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-      let y = 80 + (seed % 40);
-      for (let i = 0; i < count; i++) {
-        const r = (seed * (i + 1) * 17) % 100 / 100;
-        y = Math.max(20, Math.min(160, y + (r - 0.45) * 28));
-        points.push({ x: (i / (count - 1)) * 100, y: 100 - (y / 180) * 100 });
-      }
-      return points;
-    }
-    function updateChart() {
-      const titleEl = document.getElementById('analyticsChartTitle');
-      if (titleEl) titleEl.textContent = chartMetricLabels[selectedChartMetric] || 'Views over time';
-      const svg = document.getElementById('analyticsLineChart');
-      const areaPath = document.getElementById('analyticsChartArea');
-      const lineEl = document.getElementById('analyticsChartLine');
-      const labelsEl = document.getElementById('analyticsChartLabels');
-      if (!svg || !areaPath || !lineEl) return;
-      const w = 400;
-      const h = 180;
-      const padding = { top: 12, right: 12, bottom: 8, left: 12 };
-      const chartW = w - padding.left - padding.right;
-      const chartH = h - padding.top - padding.bottom;
-      const points = getMockChartPoints(selectedChartMetric);
-      const xs = points.map((p) => padding.left + (p.x / 100) * chartW);
-      const ys = points.map((p) => padding.top + (1 - p.y / 100) * chartH);
-      const linePoints = xs.map((x, i) => `${x},${ys[i]}`).join(' ');
-      lineEl.setAttribute('points', linePoints);
-      const areaPoints = `${padding.left},${padding.top + chartH} ${xs.map((x, i) => `${x},${ys[i]}`).join(' ')} ${padding.left + chartW},${padding.top + chartH}`;
-      areaPath.setAttribute('d', `M ${areaPoints} Z`);
-      const timeFrame = document.getElementById('analyticsTimeFrame')?.value || '7d';
-      const labels = timeFrame === '24h' ? ['12a', '4a', '8a', '12p', '4p', '8p'] : timeFrame === '7d' ? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] : ['W1', 'W2', 'W3', 'W4'];
-      if (labelsEl) labelsEl.innerHTML = labels.map((l) => `<span class="analytics-chart-label">${escapeHtml(l)}</span>`).join('');
-    }
-    function updateMockMetrics() {
-      const scopeSelect = document.getElementById('analyticsScope');
-      const scopeLabel = document.getElementById('analyticsScopeLabel');
-      const scope = scopeSelect && scopeSelect.value ? scopeSelect.value : '';
-      const scopeName = scope ? (campaignsList.find((c) => String(c.id) === scope)?.name || 'Campaign') : 'all pages';
-      if (scopeLabel) scopeLabel.textContent = scope ? `Showing mock data for campaign: ${scopeName}.` : 'Showing mock data for all pages.';
-      ['analyticsViews', 'analyticsFollowers', 'analyticsLikes', 'analyticsComments', 'analyticsShares'].forEach((id) => {
-        const el = document.getElementById(id);
-        if (el) el.textContent = formatMockValue();
-      });
-      updateChart();
-    }
-    function setSelectedMetric(metric) {
-      selectedChartMetric = metric;
-      main.querySelectorAll('.analytics-metric-btn').forEach((btn) => {
-        btn.classList.toggle('analytics-metric-selected', btn.dataset.chartMetric === metric);
-      });
-      updateChart();
-    }
-    main.querySelectorAll('.analytics-metric-btn').forEach((btn) => {
-      btn.addEventListener('click', () => setSelectedMetric(btn.dataset.chartMetric || 'views'));
-    });
-    updateMockMetrics();
-    main.querySelector('#analyticsTimeFrame')?.addEventListener('change', updateMockMetrics);
-    main.querySelector('#analyticsScope')?.addEventListener('change', updateMockMetrics);
   });
 }
 
 function renderPages() {
   setBreadcrumb({ view: 'pages' });
+  showViewLoading();
   Promise.all([apiProjects(), apiAllCampaigns()]).then(([projects, campaigns]) => {
     const main = document.getElementById('main');
     main.innerHTML = `
@@ -1471,7 +1522,9 @@ function renderPages() {
       const unassigned = items.filter((p) => !p.section || !PAGE_SECTIONS.includes(p.section));
       const renderCircle = (p) => {
         const initial = (p.name || 'P').charAt(0).toUpperCase();
-        const img = p.hasAvatar ? `<img src="${projectAvatarUrl(p.id)}" alt="" />` : `<span class="project-circle-initial">${initial}</span>`;
+        const fallbackSrc = `https://unavatar.io/tiktok/${encodeURIComponent(p.name || '')}`;
+        const src = p.hasAvatar ? projectAvatarUrl(p.id) : fallbackSrc;
+        const img = `<img src="${src}" alt="" onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="project-circle-initial" style="display:none;">${initial}</span>`;
         return `<div class="project-circle-wrap" data-project-id="${p.id}"><a href="#/project/${p.id}" class="project-circle" title="${escapeHtml(p.name)}">${img}</a><span class="project-circle-name">${escapeHtml(p.name)}</span><button type="button" class="project-circle-delete" data-action="delete" data-id="${p.id}">Delete</button></div>`;
       };
       return sectionOrder.map((section) => {
@@ -1514,6 +1567,7 @@ function renderPages() {
 
 function renderRecurringPages() {
   setBreadcrumb({ view: 'recurringPages' });
+  showViewLoading();
   Promise.all([apiRecurringPagesGet(), apiProjects()]).then(([recurringIds, projects]) => {
     const main = document.getElementById('main');
     const recurringProjects = (recurringIds || []).map((id) => projects.find((p) => String(p.id) === String(id))).filter(Boolean);
@@ -1559,7 +1613,9 @@ function renderRecurringPages() {
       if (emptyEl) emptyEl.style.display = 'none';
       grid.innerHTML = recurringProjects.map((p) => {
         const initial = (p.name || 'P').charAt(0).toUpperCase();
-        const img = p.hasAvatar ? `<img src="${projectAvatarUrl(p.id)}" alt="" />` : `<span class="project-circle-initial">${initial}</span>`;
+        const fallbackSrc = `https://unavatar.io/tiktok/${encodeURIComponent(p.name || '')}`;
+        const src = p.hasAvatar ? projectAvatarUrl(p.id) : fallbackSrc;
+        const img = `<img src="${src}" alt="" onerror="this.onerror=null;this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="project-circle-initial" style="display:none;">${initial}</span>`;
         return `<div class="project-circle-wrap" data-project-id="${p.id}">
           <a href="#/recurring-pages/${p.id}" class="project-circle" title="${escapeHtml(p.name)}">${img}</a>
           <span class="project-circle-name">${escapeHtml(p.name)}</span>
@@ -2014,7 +2070,7 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
       </div>
     </section>
     <section class="card">
-      <h2>Run now & webContentUrls</h2>
+      <h2>Run now & Generated URLs</h2>
       <p class="hint">Run once to pick the least-used video (Priority, then Fallback) and generate its URL. The video is published via Blotato.</p>
       <label class="checkbox-field" style="margin-bottom:12px;"><input type="checkbox" id="sendAsDraft" ${campaign.sendAsDraft ? 'checked' : ''} /><span>Send to Blotato as draft</span></label>
       <p class="hint" style="margin-top:-8px;margin-bottom:12px;">When checked, the post goes to TikTok drafts (mobile app) instead of publishing immediately.</p>
@@ -2024,7 +2080,7 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
       </div>
       <div class="run-status" id="runStatus"></div>
       <div class="urls-wrap" id="urlsWrap">
-        <div class="urls-placeholder" id="urlsPlaceholder">${(latest.webContentUrls || []).length ? '' : 'Run once to see URLs.'}</div>
+        <div class="urls-placeholder" id="urlsPlaceholder">${(latest.webContentUrls || []).length ? '' : 'Run to generate media URLs.'}</div>
         <ul class="urls-list" id="urlsList"></ul>
         <button type="button" class="btn btn-secondary btn-copy-all" id="copyAllUrls" style="display: none;">Copy all URLs</button>
       </div>
@@ -2105,7 +2161,7 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
       if (!ok) return;
       apiClearCampaignUrls(pid, cid).then(() => {
         document.getElementById('urlsPlaceholder').style.display = 'block';
-        document.getElementById('urlsPlaceholder').textContent = 'Run once to see URLs.';
+        document.getElementById('urlsPlaceholder').textContent = 'Run to generate media URLs.';
         document.getElementById('urlsList').innerHTML = '';
         document.getElementById('copyAllUrls').style.display = 'none';
       });
@@ -2115,7 +2171,7 @@ function renderCampaignVideo(pid, cid, ptId, project, campaign, foldersData, lat
     const placeholder = document.getElementById('urlsPlaceholder');
     const list = document.getElementById('urlsList');
     const copyAllBtn = document.getElementById('copyAllUrls');
-    if (!urls.length) { placeholder.style.display = 'block'; placeholder.textContent = 'Run once to see URLs.'; list.innerHTML = ''; copyAllBtn.style.display = 'none'; return; }
+    if (!urls.length) { placeholder.style.display = 'block'; placeholder.textContent = 'Run to generate media URLs.'; list.innerHTML = ''; copyAllBtn.style.display = 'none'; return; }
     placeholder.style.display = 'none';
     copyAllBtn.style.display = 'inline-block';
     list.innerHTML = urls.map((url) => `<li class="url-item"><span class="url-text">${escapeHtml(url)}</span><button type="button" class="btn btn-secondary btn-copy-url">Copy</button></li>`).join('');
@@ -2284,7 +2340,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
       <button type="button" class="btn btn-secondary" id="saveCampaign">Save campaign</button>
     </section>
     <section class="card">
-      <h2>Run now & webContentUrls</h2>
+      <h2>Run now & Generated URLs</h2>
       <p class="hint">Run once to generate a video with text overlay and get the URL. Send to Blotato/n8n.</p>
       <label class="checkbox-field" style="margin-bottom:12px;">
         <input type="checkbox" id="sendAsDraft" ${campaign.sendAsDraft ? 'checked' : ''} />
@@ -2296,7 +2352,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
       </div>
       <div class="run-status" id="runStatus"></div>
       <div class="urls-wrap" id="urlsWrap">
-        <div class="urls-placeholder" id="urlsPlaceholder">${(latest.webContentUrls || []).length ? '' : 'Run once to see URLs.'}</div>
+        <div class="urls-placeholder" id="urlsPlaceholder">${(latest.webContentUrls || []).length ? '' : 'Run to generate media URLs.'}</div>
         <ul class="urls-list" id="urlsList"></ul>
         <button type="button" class="btn btn-secondary btn-copy-all" id="copyAllUrls" style="display: none;">Copy all URLs</button>
       </div>
@@ -2517,7 +2573,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
       if (!ok) return;
       apiClearCampaignUrls(pid, cid).then(() => {
         document.getElementById('urlsPlaceholder').style.display = 'block';
-        document.getElementById('urlsPlaceholder').textContent = 'Run once to see URLs.';
+        document.getElementById('urlsPlaceholder').textContent = 'Run to generate media URLs.';
         document.getElementById('urlsList').innerHTML = '';
         document.getElementById('copyAllUrls').style.display = 'none';
       });
@@ -2528,7 +2584,7 @@ function renderCampaignVideoWithText(pid, cid, ptId, project, campaign, foldersD
     const placeholder = document.getElementById('urlsPlaceholder');
     const list = document.getElementById('urlsList');
     const copyAllBtn = document.getElementById('copyAllUrls');
-    if (!urls.length) { placeholder.style.display = 'block'; placeholder.textContent = 'Run once to see URLs.'; list.innerHTML = ''; copyAllBtn.style.display = 'none'; return; }
+    if (!urls.length) { placeholder.style.display = 'block'; placeholder.textContent = 'Run to generate media URLs.'; list.innerHTML = ''; copyAllBtn.style.display = 'none'; return; }
     placeholder.style.display = 'none';
     copyAllBtn.style.display = 'inline-block';
     list.innerHTML = urls.map((url) => `<li class="url-item"><span class="url-text">${escapeHtml(url)}</span><button type="button" class="btn btn-secondary btn-copy-url">Copy</button></li>`).join('');
@@ -2916,7 +2972,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
       </section>
 
       <section class="card">
-        <h2>Run now & webContentUrls</h2>
+        <h2>Run now & Generated URLs</h2>
         <p class="hint">Run once to generate images and URLs. Send these URLs to Blotato/n8n.</p>
         <label class="field" style="margin-bottom:8px;">
           <span>Post title (optional, max 90 chars)</span>
@@ -2936,7 +2992,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
         </div>
         <div class="run-status" id="runStatus"></div>
         <div class="urls-wrap" id="urlsWrap">
-          <div class="urls-placeholder" id="urlsPlaceholder">${(latest.webContentUrls || []).length ? '' : 'Run once to see URLs.'}</div>
+          <div class="urls-placeholder" id="urlsPlaceholder">${(latest.webContentUrls || []).length ? '' : 'Run to generate media URLs.'}</div>
           <ul class="urls-list" id="urlsList"></ul>
           <button type="button" class="btn btn-secondary btn-copy-all" id="copyAllUrls" style="display: none;">Copy all URLs</button>
         </div>
@@ -3244,7 +3300,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
           const placeholder = document.getElementById('urlsPlaceholder');
           const list = document.getElementById('urlsList');
           const copyAllBtn = document.getElementById('copyAllUrls');
-          if (placeholder) { placeholder.style.display = 'block'; placeholder.textContent = 'Run once to see URLs.'; }
+          if (placeholder) { placeholder.style.display = 'block'; placeholder.textContent = 'Run to generate media URLs.'; }
           if (list) list.innerHTML = '';
           if (copyAllBtn) copyAllBtn.style.display = 'none';
         });
@@ -3314,7 +3370,7 @@ function renderCampaign(projectId, campaignId, postTypeId) {
       const copyAllBtn = document.getElementById('copyAllUrls');
       if (!urls.length) {
         placeholder.style.display = 'block';
-        placeholder.textContent = 'Run once to see URLs.';
+        placeholder.textContent = 'Run to generate media URLs.';
         list.innerHTML = '';
         copyAllBtn.style.display = 'none';
         return;
@@ -3446,7 +3502,7 @@ function renderCampaignFolderPhotos(projectId, campaignId, folderNum, postTypeId
           if (!ok) return;
           apiClearFolder(pid, cid, fnum, ptId).then((r) => {
             refresh();
-            showAlert(r.deleted !== undefined ? `Cleared ${r.deleted} photo(s).` : 'Folder cleared.');
+            showToast(r.deleted !== undefined ? `Cleared ${r.deleted} photo(s).` : 'Folder cleared.', 'success');
           }).catch(() => showAlert('Failed to clear folder'));
         });
       });
@@ -3603,7 +3659,7 @@ function renderCampaignFolderVideos(projectId, campaignId, folderNum, postTypeId
           if (!ok) return;
           apiClearFolder(pid, cid, fnum, ptId).then((r) => {
             refresh();
-            showAlert(r.deleted !== undefined ? `Cleared ${r.deleted} video(s).` : 'Folder cleared.');
+            showToast(r.deleted !== undefined ? `Cleared ${r.deleted} video(s).` : 'Folder cleared.', 'success');
           }).catch(() => showAlert('Failed to clear folder'));
         });
       });
@@ -3795,7 +3851,12 @@ function openNewCampaignModal(projects, onSuccess) {
 
 function renderCampaigns() {
   setBreadcrumb({ view: 'campaigns' });
-  Promise.all([apiProjects(), apiAllCampaigns()]).then(([projects, campaigns]) => {
+  showViewLoading();
+  Promise.all([
+    apiProjects(),
+    apiAllCampaigns(),
+    apiWithAuth(`${API}/api/calendar?_=${Date.now()}`).then((r) => r.json()).catch(() => ({ items: [] })),
+  ]).then(([projects, campaigns, calData]) => {
     const main = document.getElementById('main');
     main.innerHTML = `
       <section class="card">
@@ -3811,6 +3872,33 @@ function renderCampaigns() {
     const projectMap = {};
     projects.forEach((p) => { projectMap[p.id] = p; });
     const getPageIds = (c) => (c.pageIds && c.pageIds.length) ? c.pageIds : (c.projectId != null ? [c.projectId] : []);
+
+    // Build per-campaign stats from calendar data
+    const calItems = (calData && calData.items) || [];
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const weekStart = new Date(now);
+    weekStart.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+    weekStart.setHours(0, 0, 0, 0);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 7);
+    const cutoff24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+    const campaignStats = {};
+    calItems.forEach((it) => {
+      const cid = String(it.campaignId);
+      if (!campaignStats[cid]) campaignStats[cid] = { weekPosts: 0, failures24h: 0 };
+      const d = new Date(it.scheduledAt || (it.date + 'T12:00:00Z'));
+      if (it.postStatus === 'success' && d >= weekStart && d < weekEnd) campaignStats[cid].weekPosts++;
+      if (it.postStatus === 'failure' && d >= cutoff24h) campaignStats[cid].failures24h++;
+    });
+
+    const fmtDate = (s) => {
+      if (!s) return '';
+      const d = new Date(s + 'T12:00:00Z');
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    };
+
     if (!campaigns.length) {
       list.innerHTML = '<p class="empty">No campaigns yet. Start a new campaign and select which pages to post to.</p>';
     } else {
@@ -3833,6 +3921,36 @@ function renderCampaigns() {
           : '';
         const pausedBadge = c.paused ? `<span class="release-type-badge" style="background:#6b7280;color:#fff;font-size:0.7em;">Paused</span>` : '';
         const avatarImg = `<img src="${campaignAvatarUrl(c.id)}" alt="" class="campaign-avatar-img" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" style="display:none;">${(c.name || 'C').charAt(0).toUpperCase()}</span>`;
+
+        // Status line
+        const stats = campaignStats[String(c.id)] || {};
+        let statusDot = 'inactive';
+        let statusText = '';
+        if (c.paused) {
+          statusDot = 'inactive';
+          statusText = 'Paused';
+        } else if (stats.failures24h > 0) {
+          statusDot = 'warning';
+          statusText = `${stats.failures24h} failure${stats.failures24h !== 1 ? 's' : ''} in last 24h`;
+        } else {
+          const start = c.startDate || c.releaseDate || '';
+          const end = c.endDate || '';
+          if (start && todayStr < start) {
+            statusDot = 'inactive';
+            statusText = `Not started · Starts ${escapeHtml(fmtDate(start))}`;
+          } else if (end && todayStr > end) {
+            statusDot = 'inactive';
+            statusText = `Ended · ${escapeHtml(fmtDate(end))}`;
+          } else if (stats.weekPosts > 0) {
+            statusDot = 'active';
+            statusText = `Active · ${stats.weekPosts} post${stats.weekPosts !== 1 ? 's' : ''} this week`;
+          } else {
+            statusDot = 'inactive';
+            statusText = 'No activity this week';
+          }
+        }
+        const statusLine = `<div class="campaign-status-line"><span class="campaign-status-dot ${statusDot}"></span><span>${statusText}</span></div>`;
+
         return `
           <div class="campaigns-list-item">
             <a href="#/campaigns/${c.id}" class="campaign-card-link">
@@ -3846,6 +3964,7 @@ function renderCampaigns() {
                     ${pausedBadge}
                   </div>
                   <span class="list-card-meta">${releaseLabel ? escapeHtml(releaseLabel) : 'No release date'}</span>
+                  ${statusLine}
                 </div>
               </div>
             </a>
@@ -4239,7 +4358,7 @@ function renderCampaignDetail(campaignId) {
         const notes = (campaignNotesEl.value || '').trim();
         apiWithAuth(`${API}/api/campaigns/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: campaign.name, pageIds, releaseDate: campaign.releaseDate, releaseType: campaign.releaseType, campaignStartDate: campaign.campaignStartDate, campaignEndDate: campaign.campaignEndDate, memberUsernames: campaign.memberUsernames || [], notes }) })
           .then((r) => { if (!r.ok) throw new Error('Save failed'); return r.json(); })
-          .then((c) => { campaign = c; if (showFeedback) showAlert('Notes saved.'); if (campaignNotesSaveBtn) { campaignNotesSaveBtn.textContent = 'Saved'; campaignNotesSaveBtn.disabled = true; setTimeout(() => { campaignNotesSaveBtn.textContent = 'Save notes'; campaignNotesSaveBtn.disabled = false; }, 2000); } })
+          .then((c) => { campaign = c; if (showFeedback) showToast('Notes saved.', 'success'); if (campaignNotesSaveBtn) { campaignNotesSaveBtn.textContent = 'Saved'; campaignNotesSaveBtn.disabled = true; setTimeout(() => { campaignNotesSaveBtn.textContent = 'Save notes'; campaignNotesSaveBtn.disabled = false; }, 2000); } })
           .catch((err) => { showAlert(err.message || 'Failed to save notes'); if (campaignNotesSaveBtn) campaignNotesSaveBtn.textContent = 'Save notes'; campaignNotesSaveBtn.disabled = false; });
       }
       campaignNotesSaveBtn.onclick = () => { if (notesSaveTimeout) clearTimeout(notesSaveTimeout); notesSaveTimeout = null; saveNotes(true); };
@@ -4679,6 +4798,7 @@ function openNewTrendModal(projects, onSuccess, options) {
 
 function renderTrends() {
   setBreadcrumb({ view: 'trends' });
+  showViewLoading();
   Promise.all([apiProjects(), apiTrends()]).then(([projects, trends]) => {
     const main = document.getElementById('main');
     main.innerHTML = `
@@ -4909,7 +5029,7 @@ function renderTrendDetail(trendId) {
         const { pageIndex, folderNum, refreshPageFolders } = trendUploadTarget;
         trendUploadTarget = null;
         trendUploadWithProgress(tid, pageIndex, folderNum, Array.from(files))
-          .then(() => { if (typeof refreshPageFolders === 'function') refreshPageFolders(); showAlert('Photos added.'); })
+          .then(() => { if (typeof refreshPageFolders === 'function') refreshPageFolders(); showToast('Photos added.', 'success'); })
           .catch((err) => showAlert(err.message || 'Upload failed'));
       };
     }
@@ -4937,7 +5057,7 @@ function renderTrendDetail(trendId) {
         const selectedIds = Array.from(main.querySelectorAll('.trend-page-cb:checked')).map((cb) => parseInt(cb.value, 10)).filter((id) => !isNaN(id));
         if (!selectedIds.length) { showAlert('Select at least one page'); return; }
         apiUpdateTrend(tid, { pageIds: selectedIds })
-          .then((t) => { trend = t; showAlert('Pages saved.'); renderTrendDetail(tid); })
+          .then((t) => { trend = t; showToast('Pages saved.', 'success'); renderTrendDetail(tid); })
           .catch((err) => showAlert(err.message || 'Failed to save pages'));
       };
     }
@@ -4949,7 +5069,7 @@ function renderTrendDetail(trendId) {
         const val = trendCampaignSelect.value;
         const campaignId = val ? String(val) : null;
         apiUpdateTrend(tid, { campaignId })
-          .then((t) => { trend = t; showAlert('Campaign link saved.'); renderTrendDetail(tid); })
+          .then((t) => { trend = t; showToast('Campaign link saved.', 'success'); renderTrendDetail(tid); })
           .catch((err) => showAlert(err.message || 'Failed to save campaign link'));
       };
     }
@@ -4983,7 +5103,7 @@ function renderTrendDetail(trendId) {
         strokeWidth: parseFloat(document.getElementById('trendTextStroke').value) ?? 2,
       };
       apiUpdateTrend(tid, { textOptions: textOptionsArr.length ? textOptionsArr : ['Follow for more'], textStyle: textStyleObj })
-        .then((t) => { trend = t; showAlert('Text styles saved.'); })
+        .then((t) => { trend = t; showToast('Text styles saved.', 'success'); })
         .catch((err) => showAlert(err.message || 'Failed to save'));
     };
 
@@ -5155,12 +5275,12 @@ function renderTrendDetail(trendId) {
         const scheduleTimes = displayTimes.map((t) => convertTimeToServer(userTz, serverTz, t));
         const newSchedules = { ...(trend.pageSchedules || {}) };
         newSchedules[p.id] = { scheduleEnabled: enabled, scheduleStartDate: scheduleStartVal, scheduleEndDate: scheduleEndVal, scheduleDaysOfWeek: daysChecked, scheduleTimes };
-        apiUpdateTrend(tid, { pageSchedules: newSchedules }).then((t) => { trend = t; showAlert('Schedule saved.'); }).catch((err) => showAlert(err.message || 'Failed to save'));
+        apiUpdateTrend(tid, { pageSchedules: newSchedules }).then((t) => { trend = t; showToast('Schedule saved.', 'success'); }).catch((err) => showAlert(err.message || 'Failed to save'));
       };
 
       const urlListEl = card.querySelector('.trend-urls-list');
       const urlsForPage = latestUrls.filter((u) => u.pageId === p.id).map((u) => u.url);
-      urlListEl.innerHTML = urlsForPage.length ? urlsForPage.map((u) => `<p class="url-item"><a href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a></p>`).join('') : '<p class="hint">Run once to see URLs.</p>';
+      urlListEl.innerHTML = urlsForPage.length ? urlsForPage.map((u) => `<p class="url-item"><a href="${escapeHtml(u)}" target="_blank" rel="noopener">${escapeHtml(u)}</a></p>`).join('') : '<p class="hint">Run to generate media URLs.</p>';
 
       const runNowBtn = card.querySelector('.trend-page-run-now');
       if (runNowBtn) {
@@ -5219,6 +5339,7 @@ function renderTrendDetail(trendId) {
 
 function renderCalendar() {
   setBreadcrumb({ view: 'calendar' });
+  showViewLoading();
   apiWithAuth(`${API}/api/calendar?_=${Date.now()}`).then((r) => r.json()).then((data) => {
     const allItems = data.items || [];
     const recurringTodo = Array.isArray(data.recurringTodo) ? data.recurringTodo : (data.todo || []).filter((t) => t.type === 'recurring').sort((a, b) => ((a.daysUntil ?? 999) - (b.daysUntil ?? 999)) || (a.stopDate || '').localeCompare(b.stopDate || ''));
@@ -5392,12 +5513,16 @@ function renderCalendar() {
               <span class="calendar-project">Page</span>
               <span class="calendar-campaign">Campaign</span>
             </div>
-            <ul class="calendar-list" id="calendarList">${dayItems.map((it) => {
+            <ul class="calendar-list" id="calendarList">${dayItems.map((it, idx) => {
               const inTz = it.scheduledAt ? formatScheduledAtInTz(it.scheduledAt, displayTz) : null;
               const timeDisplay = inTz ? inTz.timeLabel : formatTimeAMPM(it.time);
               const pageAvatar = it.projectId ? `<span class="calendar-page-avatar"><img src="${projectAvatarUrl(it.projectId)}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="calendar-page-avatar-placeholder" style="display:none;">${(it.projectName || 'P').charAt(0).toUpperCase()}</span></span>` : '';
               const statusClass = it.postStatus === 'success' ? ' calendar-item-success' : it.postStatus === 'failure' ? ' calendar-item-failure' : '';
-              return `<li class="calendar-item${statusClass}"><span class="calendar-time">${timeDisplay}</span><span class="calendar-project">${pageAvatar}<span class="calendar-page-name">${escapeHtml(it.projectName)}</span></span><span class="calendar-campaign"><a href="#/campaigns/${it.campaignId}" class="calendar-campaign-link">${escapeHtml(it.campaignName)}</a></span></li>`;
+              const hasDetail = it.postStatus === 'failure' && it.postError;
+              const expandable = hasDetail ? ' calendar-item-expandable' : '';
+              const detailId = `calItemDetail-${idx}`;
+              const detailHtml = hasDetail ? `<div class="calendar-item-detail is-error" id="${detailId}" hidden>${escapeHtml(it.postError)}</div>` : '';
+              return `<li class="calendar-item${statusClass}${expandable}"${hasDetail ? ` data-detail="${detailId}"` : ''}><span class="calendar-time">${timeDisplay}</span><span class="calendar-project">${pageAvatar}<span class="calendar-page-name">${escapeHtml(it.projectName)}</span></span><span class="calendar-campaign"><a href="#/campaigns/${it.campaignId}" class="calendar-campaign-link">${escapeHtml(it.campaignName)}</a></span>${detailHtml}</li>`;
             }).join('')}</ul>
           </div>`;
       } else if (viewMode === 'calendar') {
@@ -5593,6 +5718,13 @@ function renderCalendar() {
         history.replaceState(null, '', '#/calendar');
         selectedDay = null;
         render();
+      });
+      main.querySelectorAll('.calendar-item-expandable[data-detail]').forEach((li) => {
+        li.addEventListener('click', (e) => {
+          if (e.target.closest('a')) return;
+          const detailEl = document.getElementById(li.dataset.detail);
+          if (detailEl) detailEl.hidden = !detailEl.hidden;
+        });
       });
       main.querySelectorAll('.calendar-cell-day[data-date-key]').forEach((btn) => {
         btn.addEventListener('click', () => {
