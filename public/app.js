@@ -419,6 +419,135 @@ function projectAvatarUrl(projectId) {
   return `${API}/api/projects/${projectId}/avatar?v=${getAvatarVersion('project', projectId)}`;
 }
 
+const SOCIAL_FACTS = [
+  "TikTok was downloaded over 3 billion times by 2021, making it the most downloaded app of the decade.",
+  "The average TikTok user opens the app 19 times per day.",
+  "TikTok videos under 15 seconds get the highest completion rates.",
+  "Over 1 billion people use TikTok every month.",
+  "TikTok's algorithm shows new creators' videos to a small test audience before deciding to push them wider.",
+  "The 'For You Page' (FYP) is powered by one of the most advanced recommendation algorithms ever built.",
+  "TikTok users spend an average of 95 minutes per day on the app.",
+  "More than 50% of TikTok's users are under the age of 34.",
+  "TikTok is available in 154 countries and 75 languages.",
+  "The most followed TikTok account has over 160 million followers.",
+  "A sound going viral on TikTok can increase a song's Spotify streams by 500% or more.",
+  "TikTok's 'Duet' feature was inspired by karaoke culture.",
+  "The hashtag #LearnOnTikTok has been viewed over 500 billion times.",
+  "Short-form video content gets 2.5× more engagement than long-form on average.",
+  "TikTok creators who post 1–4 times per day see the highest follower growth.",
+  "Over 90% of TikTok users access the app multiple times each day.",
+  "The first video to reach 1 million likes on TikTok was a basketball trick shot.",
+  "TikTok's parent company, ByteDance, was founded in 2012 in a small Beijing apartment.",
+  "A TikTok video can go viral even if your account has zero followers.",
+  "Adding captions to TikTok videos increases average watch time by 16%.",
+  "Instagram Reels was launched in 2020 specifically to compete with TikTok.",
+  "YouTube Shorts generates over 70 billion daily views.",
+  "Instagram has over 2 billion monthly active users.",
+  "The average Instagram post gets the most engagement on Tuesdays and Wednesdays.",
+  "Carousel posts on Instagram get 3× more engagement than single-image posts.",
+  "Instagram Stories are viewed by 500 million accounts every single day.",
+  "The first photo ever posted on Instagram was a golden retriever by co-founder Kevin Systrom.",
+  "80% of Instagram users follow at least one business account.",
+  "Instagram was acquired by Facebook (now Meta) for $1 billion in 2012 — then its highest acquisition ever.",
+  "Using 9–11 hashtags on Instagram maximizes reach without looking spammy.",
+  "Posting Reels consistently increases Instagram reach by up to 30% according to Meta.",
+  "Facebook has over 3 billion monthly active users, making it the world's largest social network.",
+  "The average Facebook user spends about 30 minutes per day on the platform.",
+  "Facebook users share over 100 billion messages per day across Messenger.",
+  "Twitter (now X) processes over 500 million tweets per day.",
+  "The most retweeted tweet of all time offered free chicken nuggets.",
+  "LinkedIn has over 900 million members across 200+ countries.",
+  "Content posted on LinkedIn between 8–10 AM on weekdays gets the most engagement.",
+  "Pinterest has 482 million monthly active users and drives more referral traffic than Twitter.",
+  "80% of Pinterest users are women, and 45% have a household income over $100K.",
+  "Snapchat reaches 75% of 13–34 year olds in the United States daily.",
+  "Snapchat users watch over 4 billion videos every day.",
+  "YouTube is the second most visited website in the world after Google.",
+  "Over 500 hours of video are uploaded to YouTube every single minute.",
+  "YouTube's recommendation algorithm drives 70% of what people watch.",
+  "The most disliked video in YouTube history was YouTube's own 2018 Rewind.",
+  "Reddit has over 50 million daily active users and 130,000+ active communities.",
+  "The average Reddit user visits the site 16 times per week.",
+  "Social media ads reach 4.76 billion people globally — that's 59% of the world's population.",
+  "Influencer marketing is now a $21 billion industry worldwide.",
+  "Micro-influencers (10K–100K followers) often have higher engagement rates than mega-influencers.",
+  "Content with a face in the thumbnail gets 38% more clicks on average.",
+  "Videos with subtitles see 80% more content watched compared to without.",
+  "The best time to post on most platforms is between 7–9 PM in the viewer's local timezone.",
+  "Using emojis in social media posts increases engagement by up to 25%.",
+  "Posts that ask a question get 100% more comments on average.",
+  "The color red generates the highest click-through rate on social media ads.",
+  "Social media users have an average of 6.7 different social media accounts.",
+  "People spend an average of 2 hours and 27 minutes on social media every day.",
+  "There are now over 4.9 billion social media users worldwide.",
+  "The global social media advertising market is worth over $200 billion annually.",
+  "Gen Z discovers new brands primarily through TikTok and Instagram over Google.",
+  "72% of marketers say video is their best-performing content type.",
+  "Live videos get 6× more interactions than regular video content.",
+  "Sound-on viewing is far more common on TikTok (93%) than Facebook (15%).",
+  "A study found that 60% of TikTok users discover new music through the platform.",
+  "TikTok's 'stitch' feature lets creators build entire story chains from each other's videos.",
+  "The #BookTok community has sold over 20 million physical books since 2020.",
+  "A single viral TikTok can generate $100,000+ in revenue for a small business overnight.",
+  "Ocean Spray's cranberry juice sales spiked 15% after a TikTok skateboarding video went viral.",
+  "The 'Duet' feature on TikTok is responsible for 15% of all TikTok content.",
+  "Hashtag challenges on TikTok average 7× more engagement than standard posts.",
+  "TikTok's ad platform reaches an estimated 945 million adults aged 18+.",
+  "The 'comment pinning' strategy — pinning a funny comment — increases re-watch rates significantly.",
+  "Posting a video at the exact same time every day conditions your audience to expect it.",
+  "Creator accounts with a consistent aesthetic grow 40% faster than inconsistent ones.",
+  "Over 60% of TikTok users have purchased a product they saw on the platform.",
+  "Instagram's algorithm prioritizes content from accounts users regularly interact with.",
+  "Reposting your best-performing content 3–6 months later can reach an entirely new audience.",
+  "The thumbnail (cover image) is the single most impactful factor in click-through rate.",
+  "Videos shot in portrait mode (9:16) outperform landscape on every mobile-first platform.",
+  "Native video — uploaded directly vs. shared as a link — gets 10× more reach on most platforms.",
+  "The phrase 'algorithm' comes from the 9th-century Persian mathematician Al-Khwarizmi.",
+  "The first YouTube video was uploaded on April 23, 2005, titled 'Me at the zoo.'",
+  "Twitter's iconic bird logo was purchased from a stock photo site for $15.",
+  "Facebook's famous 'Like' button was almost called the 'Awesome' button.",
+  "Instagram's original name was 'Burbn' — a check-in app before it became a photo platform.",
+  "The hashtag was first used on Twitter in 2007, proposed by a user named Chris Messina.",
+  "TikTok's predecessor, Musical.ly, was launched in 2014 and had 200M users when ByteDance acquired it.",
+  "Spotify and TikTok jointly found that 'TikTok songs' have a 21% higher save rate on Spotify.",
+  "Brands that respond to comments on social media see 20–40% higher customer spend.",
+  "The average carousel post on TikTok gets viewed for 60% longer than a single image.",
+  "Using trending sounds within the first 3 days of release maximizes the TikTok algorithm boost.",
+  "TikTok's Creative Center shows the top trending sounds, hashtags, and creators in real time.",
+  "Over 1 in 3 TikTok users have shared a video with a friend outside the app.",
+  "Social proof (likes, comments, shares) visible on a post increases new viewer trust by 63%.",
+  "Accounts that engage with their comments within the first hour of posting grow 5× faster.",
+  "The average TikTok creator posts 3–5 times per week for optimal growth.",
+  "Cross-posting across TikTok, Instagram Reels, and YouTube Shorts triples your content's potential reach.",
+  "A consistent posting schedule matters more than posting frequency — consistency beats volume.",
+];
+
+let _factTimer = null;
+let _factIndex = 0;
+
+function _startFactCycle() {
+  const factEl = document.getElementById('uploadFact');
+  if (!factEl) return;
+  // Pick a random starting point
+  _factIndex = Math.floor(Math.random() * SOCIAL_FACTS.length);
+  const showFact = () => {
+    if (!factEl) return;
+    factEl.style.animation = 'none';
+    factEl.offsetHeight; // reflow to restart animation
+    factEl.style.animation = '';
+    factEl.textContent = SOCIAL_FACTS[_factIndex % SOCIAL_FACTS.length];
+    _factIndex++;
+  };
+  showFact();
+  _factTimer = setInterval(showFact, 3000);
+}
+
+function _stopFactCycle() {
+  if (_factTimer) { clearInterval(_factTimer); _factTimer = null; }
+  const factEl = document.getElementById('uploadFact');
+  if (factEl) factEl.textContent = '';
+}
+
 /** Show the global upload progress bar at the bottom; percent 0–100, label e.g. "Uploading videos…" */
 function showUploadProgress(percent, label) {
   const wrap = document.getElementById('uploadProgressWrap');
@@ -430,8 +559,10 @@ function showUploadProgress(percent, label) {
   if (fill) fill.style.width = p + '%';
   if (pctEl) pctEl.textContent = Math.round(p) + '%';
   if (labelEl) labelEl.textContent = label || 'Uploading…';
+  const wasHidden = wrap.hidden;
   wrap.hidden = false;
   wrap.setAttribute('data-visible', 'true');
+  if (wasHidden) _startFactCycle();
 }
 
 /** Hide the upload progress bar */
@@ -442,6 +573,7 @@ function hideUploadProgress() {
   wrap.hidden = true;
   const fill = document.getElementById('uploadProgressFill');
   if (fill) fill.style.width = '0%';
+  _stopFactCycle();
 }
 
 /** XHR-based campaign folder upload with progress. Same args as apiCampaignUpload; returns same Promise result. */
