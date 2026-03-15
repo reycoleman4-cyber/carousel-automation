@@ -1611,8 +1611,8 @@ function renderDashboard() {
     const campaigns = Array.isArray(allCampaigns) ? allCampaigns : [];
     const activeCampaigns = campaigns.filter((c) => {
       if (c.paused) return false;
-      const start = c.startDate || c.releaseDate || '';
-      const end = c.endDate || '';
+      const start = c.campaignStartDate || c.startDate || c.releaseDate || '';
+      const end = c.campaignEndDate || c.endDate || '';
       if (!start && !end) return false;
       if (start && todayStr < start) return false;
       if (end && todayStr > end) return false;
@@ -4137,8 +4137,8 @@ function renderCampaigns() {
           statusDot = 'warning';
           statusText = `${stats.failures24h} failure${stats.failures24h !== 1 ? 's' : ''} in last 24h`;
         } else {
-          const start = c.startDate || c.releaseDate || '';
-          const end = c.endDate || '';
+          const start = c.campaignStartDate || c.startDate || c.releaseDate || '';
+          const end = c.campaignEndDate || c.endDate || '';
           if (start && todayStr < start) {
             statusDot = 'inactive';
             statusText = `Not started · Starts ${escapeHtml(fmtDate(start))}`;
