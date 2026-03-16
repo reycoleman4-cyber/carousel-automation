@@ -4307,6 +4307,7 @@ function renderCampaignDetail(campaignId) {
     const campaignAvatarEl = `<div class="campaign-detail-avatar-wrap"><div class="campaign-avatar-clickable" id="campaignDetailAvatarClickable" title="Click to change image"><div class="campaign-avatar campaign-avatar-square"><img src="${campaignAvatarUrl(cid)}" alt="" class="campaign-avatar-img" id="campaignDetailAvatar" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><span class="campaign-avatar-placeholder" id="campaignDetailAvatarPlaceholder" style="display:none;">${(campaign.name || 'C').charAt(0).toUpperCase()}</span></div></div><input type="file" accept="image/*" id="campaignDetailAvatarInput" hidden /></div>`;
     const deployedTotal = (countData && countData.count) || 0;
     const deployedByPage = (countData && countData.byPage) || {};
+    const pageIds = (campaign.pageIds && campaign.pageIds.length) ? campaign.pageIds : (campaign.projectId != null ? [campaign.projectId] : []);
     main.innerHTML = `
       <section class="card campaign-detail-card">
         <p class="back-link-wrap back-link-wrap-centered"><a href="#/campaigns" class="nav-link">← Back to campaigns</a></p>
